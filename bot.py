@@ -679,37 +679,43 @@ def filter_jobs_with_llm(jobs, user_keywords, progress_msg=None):
                     # Include more context for better matching
                     job_summaries.append(f"{idx}: {job['Title']} at {job['Company']} ({job['Location']})")
                 
-                prompt = f"""You are an extremely strict job relevance filter. Your ONLY job is to determine if a job's TITLE perfectly matches the user's search query.
+                prompt = f"""You are a highly analytical and strict job relevance filter. Your task is to deconstruct a user's search query and a list of job titles into their core components and find ONLY perfect matches.
 
 **User's Search Query**: "{user_keywords}"
 
 ---
-**Core Instructions**
+**Analysis and Filtering Process**
 
-1.  **Infer User Intent**: From "{user_keywords}", identify the user's specific professional domain (e.g., AI/ML, Software Engineering, Marketing).
+**Step 1: Deconstruct the User's Query**
+Break down the user's query into its fundamental components:
+- **Role Category**: Is this a Student position or a Professional (full-time, etc.) position?
+- **Professional Field**: What is the subject matter or technology? (e.g., "AI", "Machine Learning", "Marketing").
 
-2.  **Analyze Job Titles FIRST**: For each job, focus almost exclusively on its **TITLE**. The title reveals the job's core function.
+For the query "{user_keywords}", the components are:
+- Role Category: **Student**. This category includes roles like Werkstudent, Intern, Praktikant, Master Thesis, Bachelor Thesis.
+- Professional Field: **AI** (Artificial Intelligence, Machine Learning, Data Science)
 
-3.  **Apply EXTREME Filtering based on TITLE**:
-    - A job is **ONLY relevant if its TITLE is a PERFECT match** for the user's inferred domain and keywords.
-    - **DO NOT cross domains.** A job from a different professional field is NEVER a match, even if the company name *sounds* relevant.
-    - **Company Name Warning**: Be very careful with company names. A company called "AI-Solutions" might post a "Marketing Manager" job. This is a MARKETING job, not an AI job. The title is what matters. If the title does not match the user's query, EXCLUDE it, regardless of the company name.
+**Step 2: Deconstruct and Evaluate Each Job Title**
+For each job in the list below, deconstruct its title into the same components (Role Category and Professional Field).
 
-4.  **Your Goal**: Maximum precision. It is better to wrongly exclude a borderline job than to wrongly include an irrelevant one.
+**Step 3: Apply Strict Component Matching**
+A job is a match **ONLY IF** its components align with the user's query based on these rules:
 
-**New EXCLUSION examples based on past mistakes:**
--   Query: "Working Student AI" -> EXCLUDE "Praktikant Projekt- und Prozessmanagement" (Project Management is NOT AI).
--   Query: "Working Student AI" -> EXCLUDE "Werkstudent Marketing" even if the company is "aiomatic" (Marketing is NOT AI).
--   Query: "Working Student AI" -> EXCLUDE "Agiles IT-Projekt- und Servicemanagement" (IT Project Management is NOT AI).
+- **Role Category Must Align**: If the user asks for a Student role, other student-centric roles are acceptable. For example, if the query is "Working Student", then "Internship", "Master Thesis", or "Praktikum" are all considered valid matches for the *Role Category*.
+- **Field MUST Match Perfectly**: The job's professional field must be a direct and precise match for the user's specified field. "Power Electronics" or "Ecosystem Management" is NEVER a match for "AI". This is the most important rule.
 
-**General Cross-Domain Exclusion EXAMPLES:**
--   Query: "AI Engineer" -> EXCLUDE "DevOps Engineer" or "Sales Engineer".
--   Query: "Data Scientist" -> EXCLUDE "Data Engineer" or "Business Analyst".
--   Query: "Backend Developer" -> EXCLUDE "Frontend Developer" or "Project Manager".
+**Your Goal**: Extreme precision on the **Professional Field** while being flexible on the student **Role Category**.
+
+**Crucial Examples of What to EXCLUDE (based on past mistakes):**
+-   Query: "Working Student AI"
+    -   EXCLUDE: `Master Thesis Student in the field of Cabin Power Electronics`. **Reason**: Field mismatch (Power Electronics vs. AI). The role type (Master Thesis) is acceptable for a student search, but the field is wrong.
+    -   EXCLUDE: `Master@IBM Werkstudent Ecosystem`. **Reason**: Field mismatch (Ecosystem vs. AI).
+    -   EXCLUDE: `Werkstudent Marketing`. **Reason**: Field mismatch (Marketing vs. AI). The company name is irrelevant.
+    -   EXCLUDE: `Praktikant Projekt- und Prozessmanagement`. **Reason**: Field mismatch (Project Management vs. AI).
 
 ---
 **Job List to Analyze**:
-(Note: Job list includes company name, but you must prioritize the job TITLE for relevance)
+(You MUST focus on the job TITLE for this analysis. The company/location is just context.)
 {chr(10).join(job_summaries)}
 
 ---
