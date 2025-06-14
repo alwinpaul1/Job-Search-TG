@@ -23,7 +23,7 @@ from urllib.parse import quote_plus
 from datetime import datetime, timedelta
 import re
 import pytz
-from openai import OpenAI
+import google.generativeai as genai
 import unicodedata
 
 # --- Setup ---
@@ -42,11 +42,14 @@ warnings.filterwarnings(
 # Load environment variables
 load_dotenv()
 
-# Initialize OpenAI client for OpenRouter with DeepSeek V3
-openai_client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=os.getenv("OPENROUTER_API_KEY")
-)
+# Configure Google AI
+try:
+    genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+    gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+    logger.info("✅ Successfully configured Google AI with Gemini 1.5 Flash.")
+except Exception as e:
+    logger.error(f"❌ Failed to configure Google AI: {e}")
+    gemini_model = None
 
 # --- Text and Link Canonicalization Functions ---
 def canonical_link(url: str) -> str:
@@ -636,13 +639,13 @@ def get_job_description(job_link):
         return "No description available"
 
 def filter_jobs_with_llm(jobs, user_keywords, progress_msg=None):
-    """Use DeepSeek V3 to filter jobs based on relevance to user keywords."""
+    """Use Gemini 1.5 Flash to filter jobs based on relevance to user keywords."""
     if not jobs or not user_keywords:
         return jobs
     
-    # Check if OpenRouter API key is available
-    if not os.getenv("OPENROUTER_API_KEY"):
-        logger.warning("❌ No OpenRouter API key found, skipping LLM filtering - results may include irrelevant jobs")
+    # Check if Gemini model is available
+    if not gemini_model:
+        logger.warning("❌ Google AI SDK not configured, skipping LLM filtering - results may include irrelevant jobs")
         return jobs
     
     try:
@@ -719,15 +722,18 @@ Example: `none`
 
 Numbers only:"""
 
-                response = openai_client.chat.completions.create(
-                    model="deepseek/deepseek-chat-v3-0324:free",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=50,  # Reduced tokens
+                generation_config = genai.types.GenerationConfig(
+                    candidate_count=1,
+                    max_output_tokens=50,
                     temperature=0.1,
-                    timeout=30  # Add timeout
+                )
+                response = gemini_model.generate_content(
+                    prompt,
+                    generation_config=generation_config,
+                    # Add a timeout if the SDK supports it, or handle it in the calling code
                 )
                 
-                result = response.choices[0].message.content.strip().lower()
+                result = response.text.strip().lower()
                 logger.info(f"🤖 LLM response for batch {i//batch_size + 1}: '{result}'")
                 
                 if result != "none":
@@ -925,7 +931,7 @@ def scrape_linkedin_with_llm_filter(keyword, location, filters_dict, max_pages=N
         return []
 
     all_filtered_jobs = []
-    if os.getenv("OPENROUTER_API_KEY"):
+    if gemini_model:
         logger.info(f"🤖 Applying LLM filtering to all {len(all_scraped_jobs)} jobs...")
         all_filtered_jobs = filter_jobs_with_llm(all_scraped_jobs, keyword, progress_msg)
     else:
