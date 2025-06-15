@@ -4,6 +4,7 @@ import warnings
 import time
 import json
 import sqlite3
+import html
 from dotenv import load_dotenv
 import telegram
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode, Bot
@@ -579,10 +580,15 @@ def create_paginated_job_message(jobs, page):
     
     message_text = f"<b>Displaying page {page + 1} of {total_pages}</b>\n\n"
     for job in jobs[start_index:end_index]:
-        # Use HTML formatting instead of Markdown to avoid parsing issues
-        message_text += f"<b>{job['Title']}</b>\n"
-        message_text += f"<i>{job['Company']}</i> - {job['Location']}\n"
-        message_text += f"Posted: {job['Date Posted']}\n"
+        # Use HTML formatting and escape special characters to prevent parsing errors
+        title = html.escape(job['Title'])
+        company = html.escape(job['Company'])
+        location = html.escape(job['Location'])
+        date_posted = html.escape(job['Date Posted'])
+
+        message_text += f"<b>{title}</b>\n"
+        message_text += f"<i>{company}</i> - {location}\n"
+        message_text += f"Posted: {date_posted}\n"
         message_text += f"<a href='{job['Link']}'>View Job</a>\n\n"
         
     if not jobs[start_index:end_index]: return "No jobs to display.", None
@@ -1853,12 +1859,21 @@ def check_all_alerts(bot: Bot):
 
             if not is_duplicate:
                 new_jobs_found += 1
+                
+                # Escape HTML special characters to prevent parsing errors
+                title = html.escape(job['Title'])
+                company = html.escape(job['Company'])
+                location = html.escape(job['Location'])
+                date_posted = html.escape(job['Date Posted'])
+                keywords = html.escape(alert['keywords'])
+                alert_location = html.escape(alert['location'])
+                
                 message = (
                     f"🔔 <b>New Job Alert!</b>\n\n"
-                    f"<b>{job['Title']}</b>\n"
-                    f"<i>{job['Company']}</i> - {job['Location']}\n"
-                    f"Posted: {job['Date Posted']}\n\n"
-                    f"From your alert for: <b>{alert['keywords']}</b> in <b>{alert['location']}</b>"
+                    f"<b>{title}</b>\n"
+                    f"<i>{company}</i> - {location}\n"
+                    f"Posted: {date_posted}\n\n"
+                    f"From your alert for: <b>{keywords}</b> in <b>{alert_location}</b>"
                 )
                 keyboard = [[InlineKeyboardButton("View Job", url=job['Link']), InlineKeyboardButton("📋 My Alerts", callback_data="my_alerts")]]
                 
