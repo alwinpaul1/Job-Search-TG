@@ -679,49 +679,35 @@ def filter_jobs_with_llm(jobs, user_keywords, progress_msg=None):
                     # Include more context for better matching
                     job_summaries.append(f"{idx}: {job['Title']} at {job['Company']} ({job['Location']})")
                 
-                prompt = f"""You are a highly analytical and strict job relevance filter. Your task is to deconstruct a user's search query and a list of job titles into their core components and find ONLY perfect matches.
+                prompt = f"""You are a job title screener. Your job is to check if a job title matches a user's search query based on a strict set of rules.
 
 **User's Search Query**: "{user_keywords}"
 
----
-**Analysis and Filtering Process**
+**Rules of Analysis:**
 
-**Step 1: Deconstruct the User's Query**
-Break down the user's query into its fundamental components:
-- **Role Category**: Is this a Student position or a Professional (full-time, etc.) position?
-- **Professional Field**: What is the subject matter or technology? (e.g., "AI", "Machine Learning", "Marketing").
+1.  **Identify Core Keywords**: Break down the user's query into essential parts. For "{user_keywords}", the core concepts must be identified (e.g., "Working Student" and "AI").
 
-For the query "{user_keywords}", the components are:
-- Role Category: **Student**. This category includes roles like Werkstudent, Intern, Praktikant, Master Thesis, Bachelor Thesis.
-- Professional Field: **AI** (Artificial Intelligence, Machine Learning, Data Science)
+2.  **Strict Keyword Matching**: The job title **MUST** contain keywords related to **ALL** the core concepts from the user's query.
+    - It is not enough for just one part to match. A partial match is a failure.
 
-**Step 2: Deconstruct and Evaluate Each Job Title**
-For each job in the list below, deconstruct its title into the same components (Role Category and Professional Field).
+3.  **Domain Check**: The domain/function described in the job title must match the domain/function of the query. For example, "Communications" is not the "AI" domain.
 
-**Step 3: Apply Strict Component Matching**
-A job is a match **ONLY IF** its components align with the user's query based on these rules:
+4.  **IGNORE Company Name**: Do not consider the company name for relevance.
 
-- **Role Category Must Align**: If the user asks for a Student role, other student-centric roles are acceptable. For example, if the query is "Working Student", then "Internship", "Master Thesis", or "Praktikum" are all considered valid matches for the *Role Category*.
-- **Field MUST Match Perfectly**: The job's professional field must be a direct and precise match for the user's specified field. "Power Electronics" or "Ecosystem Management" is NEVER a match for "AI". This is the most important rule.
+**Example of a definite failure to avoid:**
+- User Query: "Working Student AI"
+- Job Title: "Working Student: Events & protocol - Communications (d/f/m)"
+- **Analysis**: This is a **BAD** match. While it is a "Working Student" position, its domain is "Communications", which is completely unrelated to "AI". You MUST exclude this.
 
-**Your Goal**: Extreme precision on the **Professional Field** while being flexible on the student **Role Category**.
-
-**Crucial Examples of What to EXCLUDE (based on past mistakes):**
--   Query: "Working Student AI"
-    -   EXCLUDE: `Master Thesis Student in the field of Cabin Power Electronics`. **Reason**: Field mismatch (Power Electronics vs. AI). The role type (Master Thesis) is acceptable for a student search, but the field is wrong.
-    -   EXCLUDE: `Master@IBM Werkstudent Ecosystem`. **Reason**: Field mismatch (Ecosystem vs. AI).
-    -   EXCLUDE: `Werkstudent Marketing`. **Reason**: Field mismatch (Marketing vs. AI). The company name is irrelevant.
-    -   EXCLUDE: `Praktikant Projekt- und Prozessmanagement`. **Reason**: Field mismatch (Project Management vs. AI).
+**Your Goal**: Be extremely literal. If the job title doesn't explicitly match all core parts of the query, discard it.
 
 ---
 **Job List to Analyze**:
-(You MUST focus on the job TITLE for this analysis. The company/location is just context.)
 {chr(10).join(job_summaries)}
 
 ---
-**Output Instructions**
-
-Return ONLY a comma-separated list of the numbers for the perfectly matching jobs. If none match, return "none".
+**Output Instructions**:
+Return ONLY the numbers of the relevant jobs, separated by a comma. If none are relevant, return "none".
 
 Example: `1, 4`
 Example: `none`
