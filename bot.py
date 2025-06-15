@@ -747,9 +747,13 @@ Numbers only:"""
                     logger.info(f"🚫 LLM returned 'none' - no relevant jobs in this batch")
                 
             except Exception as batch_error:
-                logger.warning(f"LLM filtering failed for batch {i//batch_size + 1}: {batch_error}")
-                # Include all jobs from failed batch
-                filtered_jobs.extend(batch)
+                # Check for rate limit error specifically
+                if "429" in str(batch_error) and "quota" in str(batch_error).lower():
+                    logger.error(f"RATE LIMIT on batch {i//batch_size + 1}. Skipping remaining batches for this search/alert to avoid irrelevant results.")
+                    break
+                else:
+                    logger.warning(f"LLM batch {i//batch_size + 1} failed, including all jobs from batch. Error: {batch_error}")
+                    filtered_jobs.extend(batch)
             
             # Reduced rate limiting since we're making fewer calls
             time.sleep(0.5)
