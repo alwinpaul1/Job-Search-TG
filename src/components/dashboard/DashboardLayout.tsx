@@ -1,8 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import Link from 'next/link'
-import { usePathname, useRouter } from 'next/navigation'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
   HomeIcon,
   BellIcon,
@@ -32,8 +31,8 @@ interface DashboardLayoutProps {
 export default function DashboardLayout({ children }: DashboardLayoutProps) {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [user, setUser] = useState<any>(null)
-  const pathname = usePathname()
-  const router = useRouter()
+  const location = useLocation()
+  const navigate = useNavigate()
 
   useEffect(() => {
     // Check if user is logged in
@@ -42,26 +41,35 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
       setUser(JSON.parse(userData))
     } else {
       // Redirect to login if not authenticated
-      router.push('/auth/login')
+      navigate('/auth/login')
     }
-  }, [router])
+  }, [navigate])
 
   const handleSignOut = () => {
     localStorage.removeItem('user')
-    router.push('/')
+    navigate('/')
   }
 
   // Show loading while checking authentication
   if (!user) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600"></div>
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-100 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-16 w-16 border-4 border-primary-600 border-t-transparent mx-auto mb-4"></div>
+          <p className="text-gray-600 font-medium">Loading your dashboard...</p>
+        </div>
       </div>
     )
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-100">
+      {/* Background Elements */}
+      <div className="fixed inset-0 overflow-hidden pointer-events-none">
+        <div className="absolute -top-40 -right-40 w-80 h-80 bg-gradient-to-br from-purple-400 to-pink-400 rounded-full mix-blend-multiply filter blur-xl opacity-10 floating-animation"></div>
+        <div className="absolute -bottom-40 -left-40 w-80 h-80 bg-gradient-to-br from-yellow-400 to-orange-400 rounded-full mix-blend-multiply filter blur-xl opacity-10 floating-animation" style={{ animationDelay: '2s' }}></div>
+      </div>
+
       {/* Mobile sidebar */}
       <AnimatePresence>
         {sidebarOpen && (
@@ -79,31 +87,31 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
               initial={{ x: -300 }}
               animate={{ x: 0 }}
               exit={{ x: -300 }}
-              className="fixed inset-y-0 left-0 z-50 w-64 bg-white shadow-xl lg:hidden"
+              className="fixed inset-y-0 left-0 z-50 w-72 bg-white/90 backdrop-blur-xl shadow-2xl lg:hidden border-r border-white/20"
             >
-              <div className="flex items-center justify-between h-16 px-4 border-b border-gray-200">
-                <Link href="/dashboard" className="text-xl font-bold text-gradient">
+              <div className="flex items-center justify-between h-20 px-6 border-b border-gray-200/50">
+                <Link to="/dashboard" className="text-2xl font-bold text-gradient">
                   JobScout Pro
                 </Link>
                 <button
                   onClick={() => setSidebarOpen(false)}
-                  className="text-gray-400 hover:text-gray-600"
+                  className="text-gray-400 hover:text-gray-600 p-2 rounded-lg hover:bg-gray-100/50 transition-colors"
                 >
                   <XMarkIcon className="h-6 w-6" />
                 </button>
               </div>
-              <nav className="mt-8 px-4">
+              <nav className="mt-8 px-6">
                 <div className="space-y-2">
                   {navigation.map((item) => {
-                    const isActive = pathname === item.href
+                    const isActive = location.pathname === item.href
                     return (
                       <Link
                         key={item.name}
-                        href={item.href}
-                        className={`flex items-center px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                        to={item.href}
+                        className={`flex items-center px-4 py-3 rounded-xl text-sm font-semibold transition-all duration-200 ${
                           isActive
-                            ? 'bg-primary-50 text-primary-700 border-r-2 border-primary-700'
-                            : 'text-gray-700 hover:bg-gray-100'
+                            ? 'bg-gradient-to-r from-primary-500 to-purple-500 text-white shadow-lg'
+                            : 'text-gray-700 hover:bg-white/50 hover:text-primary-600'
                         }`}
                         onClick={() => setSidebarOpen(false)}
                       >
@@ -113,13 +121,13 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
                     )
                   })}
                 </div>
-                <div className="mt-8 pt-8 border-t border-gray-200">
-                  <div className="px-3 py-2 text-sm text-gray-600">
+                <div className="mt-8 pt-8 border-t border-gray-200/50">
+                  <div className="px-4 py-2 text-sm text-gray-600 font-medium">
                     Welcome, {user.name}
                   </div>
                   <button
                     onClick={handleSignOut}
-                    className="flex items-center w-full px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
+                    className="flex items-center w-full px-4 py-3 text-sm font-semibold text-gray-700 hover:bg-red-50 hover:text-red-600 rounded-xl transition-all duration-200"
                   >
                     <ArrowRightOnRectangleIcon className="h-5 w-5 mr-3" />
                     Sign Out
@@ -132,25 +140,25 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
       </AnimatePresence>
 
       {/* Desktop sidebar */}
-      <div className="hidden lg:fixed lg:inset-y-0 lg:flex lg:w-64 lg:flex-col">
-        <div className="flex flex-col flex-grow bg-white border-r border-gray-200">
-          <div className="flex items-center h-16 px-4 border-b border-gray-200">
-            <Link href="/dashboard" className="text-xl font-bold text-gradient">
+      <div className="hidden lg:fixed lg:inset-y-0 lg:flex lg:w-72 lg:flex-col">
+        <div className="flex flex-col flex-grow bg-white/90 backdrop-blur-xl border-r border-white/20 shadow-xl">
+          <div className="flex items-center h-20 px-6 border-b border-gray-200/50">
+            <Link to="/dashboard" className="text-2xl font-bold text-gradient">
               JobScout Pro
             </Link>
           </div>
-          <nav className="mt-8 flex-1 px-4">
+          <nav className="mt-8 flex-1 px-6">
             <div className="space-y-2">
               {navigation.map((item) => {
-                const isActive = pathname === item.href
+                const isActive = location.pathname === item.href
                 return (
                   <Link
                     key={item.name}
-                    href={item.href}
-                    className={`flex items-center px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    to={item.href}
+                    className={`flex items-center px-4 py-3 rounded-xl text-sm font-semibold transition-all duration-200 ${
                       isActive
-                        ? 'bg-primary-50 text-primary-700 border-r-2 border-primary-700'
-                        : 'text-gray-700 hover:bg-gray-100'
+                        ? 'bg-gradient-to-r from-primary-500 to-purple-500 text-white shadow-lg'
+                        : 'text-gray-700 hover:bg-white/50 hover:text-primary-600'
                     }`}
                   >
                     <item.icon className="h-5 w-5 mr-3" />
@@ -159,13 +167,13 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
                 )
               })}
             </div>
-            <div className="mt-8 pt-8 border-t border-gray-200">
-              <div className="px-3 py-2 text-sm text-gray-600">
+            <div className="mt-8 pt-8 border-t border-gray-200/50">
+              <div className="px-4 py-2 text-sm text-gray-600 font-medium">
                 Welcome, {user.name}
               </div>
               <button
                 onClick={handleSignOut}
-                className="flex items-center w-full px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
+                className="flex items-center w-full px-4 py-3 text-sm font-semibold text-gray-700 hover:bg-red-50 hover:text-red-600 rounded-xl transition-all duration-200"
               >
                 <ArrowRightOnRectangleIcon className="h-5 w-5 mr-3" />
                 Sign Out
@@ -176,25 +184,25 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
       </div>
 
       {/* Main content */}
-      <div className="lg:pl-64">
+      <div className="lg:pl-72">
         {/* Top bar */}
-        <div className="sticky top-0 z-10 bg-white border-b border-gray-200 lg:hidden">
+        <div className="sticky top-0 z-10 bg-white/80 backdrop-blur-md border-b border-white/20 lg:hidden">
           <div className="flex items-center justify-between h-16 px-4">
             <button
               onClick={() => setSidebarOpen(true)}
-              className="text-gray-400 hover:text-gray-600"
+              className="text-gray-400 hover:text-gray-600 p-2 rounded-lg hover:bg-gray-100/50 transition-colors"
             >
               <Bars3Icon className="h-6 w-6" />
             </button>
-            <Link href="/dashboard" className="text-lg font-bold text-gradient">
+            <Link to="/dashboard" className="text-xl font-bold text-gradient">
               JobScout Pro
             </Link>
-            <div className="w-6" /> {/* Spacer */}
+            <div className="w-10" /> {/* Spacer */}
           </div>
         </div>
 
         {/* Page content */}
-        <main className="p-4 lg:p-8">
+        <main className="p-6 lg:p-10">
           {children}
         </main>
       </div>

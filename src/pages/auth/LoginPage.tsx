@@ -55,24 +55,33 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 flex flex-col justify-center py-12 sm:px-6 lg:px-8">
-      <div className="sm:mx-auto sm:w-full sm:max-w-md">
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-100 flex flex-col justify-center py-12 sm:px-6 lg:px-8 relative">
+      {/* Background Elements */}
+      <div className="fixed inset-0 overflow-hidden pointer-events-none">
+        <div className="absolute -top-40 -right-40 w-80 h-80 bg-gradient-to-br from-purple-400 to-pink-400 rounded-full mix-blend-multiply filter blur-xl opacity-20 floating-animation"></div>
+        <div className="absolute -bottom-40 -left-40 w-80 h-80 bg-gradient-to-br from-yellow-400 to-orange-400 rounded-full mix-blend-multiply filter blur-xl opacity-20 floating-animation" style={{ animationDelay: '2s' }}></div>
+      </div>
+
+      <div className="sm:mx-auto sm:w-full sm:max-w-md relative">
         <div className="text-center">
-          <h1 className="text-3xl font-bold text-gradient">JobScout Pro</h1>
-          <h2 className="mt-6 text-3xl font-bold text-gray-900">
-            Sign in to your account
+          <h1 className="text-4xl font-bold text-gradient">JobScout Pro</h1>
+          <h2 className="mt-8 text-3xl font-bold text-gray-900">
+            Welcome back
           </h2>
-          <p className="mt-2 text-sm text-gray-600">
-            Or{' '}
-            <Link to="/auth/signup" className="font-medium text-primary-600 hover:text-primary-500">
-              create a new account
+          <p className="mt-3 text-lg text-gray-600">
+            Sign in to continue your job search journey
+          </p>
+          <p className="mt-2 text-sm text-gray-500">
+            Don't have an account?{' '}
+            <Link to="/auth/signup" className="font-semibold text-primary-600 hover:text-primary-500 transition-colors">
+              Create one now
             </Link>
           </p>
         </div>
       </div>
 
-      <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
-        <div className="card">
+      <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md relative">
+        <div className="card shadow-2xl">
           <form className="space-y-6" onSubmit={handleSubmit(onSubmit)}>
             <div>
               <label htmlFor="email" className="label">
@@ -85,7 +94,7 @@ export default function LoginPage() {
                 placeholder="john@example.com"
               />
               {errors.email && (
-                <p className="mt-1 text-sm text-error-600">{errors.email.message}</p>
+                <p className="mt-2 text-sm text-red-600 font-medium">{errors.email.message}</p>
               )}
             </div>
 
@@ -97,23 +106,23 @@ export default function LoginPage() {
                 <input
                   {...register('password')}
                   type={showPassword ? 'text' : 'password'}
-                  className="input-field pr-10"
+                  className="input-field pr-12"
                   placeholder="••••••••"
                 />
                 <button
                   type="button"
-                  className="absolute inset-y-0 right-0 pr-3 flex items-center"
+                  className="absolute inset-y-0 right-0 pr-4 flex items-center text-gray-400 hover:text-gray-600 transition-colors"
                   onClick={() => setShowPassword(!showPassword)}
                 >
                   {showPassword ? (
-                    <EyeSlashIcon className="h-5 w-5 text-gray-400" />
+                    <EyeSlashIcon className="h-5 w-5" />
                   ) : (
-                    <EyeIcon className="h-5 w-5 text-gray-400" />
+                    <EyeIcon className="h-5 w-5" />
                   )}
                 </button>
               </div>
               {errors.password && (
-                <p className="mt-1 text-sm text-error-600">{errors.password.message}</p>
+                <p className="mt-2 text-sm text-red-600 font-medium">{errors.password.message}</p>
               )}
             </div>
 
@@ -125,13 +134,13 @@ export default function LoginPage() {
                   type="checkbox"
                   className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded"
                 />
-                <label htmlFor="remember-me" className="ml-2 block text-sm text-gray-900">
+                <label htmlFor="remember-me" className="ml-2 block text-sm text-gray-900 font-medium">
                   Remember me
                 </label>
               </div>
 
               <div className="text-sm">
-                <a href="#" className="font-medium text-primary-600 hover:text-primary-500">
+                <a href="#" className="font-semibold text-primary-600 hover:text-primary-500 transition-colors">
                   Forgot your password?
                 </a>
               </div>
@@ -143,14 +152,21 @@ export default function LoginPage() {
                 disabled={isLoading}
                 className="w-full btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {isLoading ? 'Signing in...' : 'Sign in'}
+                {isLoading ? (
+                  <div className="flex items-center justify-center">
+                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></div>
+                    Signing in...
+                  </div>
+                ) : (
+                  'Sign in'
+                )}
               </button>
             </div>
           </form>
 
           {/* Demo info */}
-          <div className="mt-6 p-3 bg-blue-50 rounded-lg">
-            <p className="text-sm text-blue-800">
+          <div className="mt-8 p-4 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl border border-blue-200/50">
+            <p className="text-sm text-blue-800 font-medium">
               <strong>Demo Mode:</strong> Use any email and password to sign in and explore the features.
             </p>
           </div>

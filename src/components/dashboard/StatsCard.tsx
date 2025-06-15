@@ -16,28 +16,28 @@ interface StatsCardProps {
 
 const colorClasses = {
   blue: {
-    bg: 'bg-blue-50',
-    icon: 'text-blue-600',
+    bg: 'from-blue-500 to-cyan-500',
+    icon: 'text-white',
     text: 'text-blue-600'
   },
   green: {
-    bg: 'bg-green-50',
-    icon: 'text-green-600',
+    bg: 'from-green-500 to-emerald-500',
+    icon: 'text-white',
     text: 'text-green-600'
   },
   yellow: {
-    bg: 'bg-yellow-50',
-    icon: 'text-yellow-600',
+    bg: 'from-yellow-500 to-orange-500',
+    icon: 'text-white',
     text: 'text-yellow-600'
   },
   purple: {
-    bg: 'bg-purple-50',
-    icon: 'text-purple-600',
+    bg: 'from-purple-500 to-pink-500',
+    icon: 'text-white',
     text: 'text-purple-600'
   },
   red: {
-    bg: 'bg-red-50',
-    icon: 'text-red-600',
+    bg: 'from-red-500 to-pink-500',
+    icon: 'text-white',
     text: 'text-red-600'
   }
 }
@@ -49,26 +49,28 @@ export default function StatsCard({ title, value, icon: Icon, color, badge, tren
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      className="card hover:shadow-md transition-shadow duration-200"
+      className="card hover:shadow-2xl transition-all duration-300 group hover:-translate-y-1"
     >
       <div className="flex items-center">
-        <div className={`p-3 rounded-lg ${colors.bg}`}>
-          <Icon className={`h-6 w-6 ${colors.icon}`} />
+        <div className={`p-4 rounded-2xl bg-gradient-to-r ${colors.bg} shadow-lg group-hover:shadow-xl transition-shadow duration-300`}>
+          <Icon className={`h-8 w-8 ${colors.icon}`} />
         </div>
-        <div className="ml-4 flex-1">
+        <div className="ml-6 flex-1">
           <div className="flex items-center justify-between">
-            <p className="text-sm font-medium text-gray-600">{title}</p>
+            <p className="text-sm font-semibold text-gray-600 uppercase tracking-wide">{title}</p>
             {badge && (
-              <span className="px-2 py-1 text-xs bg-primary-100 text-primary-800 rounded-full">
+              <span className="px-3 py-1 text-xs bg-gradient-to-r from-primary-100 to-purple-100 text-primary-800 rounded-full font-semibold">
                 {badge}
               </span>
             )}
           </div>
-          <div className="flex items-center mt-1">
-            <p className="text-2xl font-semibold text-gray-900">{value}</p>
+          <div className="flex items-center mt-2">
+            <p className="text-3xl font-bold text-gray-900">{value}</p>
             {trend && (
-              <span className={`ml-2 text-sm ${
-                trend.isPositive ? 'text-success-600' : 'text-error-600'
+              <span className={`ml-3 text-sm font-semibold px-2 py-1 rounded-full ${
+                trend.isPositive 
+                  ? 'text-green-700 bg-green-100' 
+                  : 'text-red-700 bg-red-100'
               }`}>
                 {trend.isPositive ? '+' : '-'}{Math.abs(trend.value)}%
               </span>
