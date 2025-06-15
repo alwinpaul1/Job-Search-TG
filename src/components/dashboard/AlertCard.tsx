@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import Link from 'next/link'
+import { Link } from 'react-router-dom'
 import {
   BellIcon,
   MapPinIcon,
@@ -106,7 +106,7 @@ export default function AlertCard({ alert }: AlertCardProps) {
 
         <div className="flex items-center space-x-2">
           <Link
-            href={`/dashboard/jobs?alert=${alert.id}`}
+            to={`/dashboard/jobs?alert=${alert.id}`}
             className="flex items-center px-3 py-1 text-sm bg-primary-50 text-primary-700 rounded-lg hover:bg-primary-100 transition-colors"
           >
             <EyeIcon className="h-4 w-4 mr-1" />
@@ -141,7 +141,7 @@ export default function AlertCard({ alert }: AlertCardProps) {
 
         <div className="flex items-center space-x-2">
           <Link
-            href={`/dashboard/alerts/${alert.id}/edit`}
+            to={`/dashboard/alerts/${alert.id}/edit`}
             className="p-2 text-gray-400 hover:text-gray-600 transition-colors"
           >
             <PencilIcon className="h-4 w-4" />

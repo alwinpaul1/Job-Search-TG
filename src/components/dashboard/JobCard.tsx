@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import Link from 'next/link'
+import { Link } from 'react-router-dom'
 import {
   MapPinIcon,
   ClockIcon,
@@ -152,7 +152,7 @@ export default function JobCard({ job, compact = false }: JobCardProps) {
 
       <div className="mt-4 flex items-center justify-between pt-4 border-t border-gray-200">
         <Link
-          href={`/dashboard/jobs/${job.id}`}
+          to={`/dashboard/jobs/${job.id}`}
           className="text-primary-600 hover:text-primary-700 font-medium text-sm"
         >
           View Details
