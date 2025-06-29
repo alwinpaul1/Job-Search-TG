@@ -1348,7 +1348,7 @@ class AdaptiveJobBERTMatcher:
             domain_weight = 0.40        # MAJOR boost from 15% to 40%
             
             logger.debug(f"Domain-specific query detected for '{query}': using domain-focused weighting")
-        else:
+                else:
             # Generic query (e.g., "Working Student", "Engineer")
             # Use semantic-focused weighting  
             semantic_weight = 0.45      # Original weight
@@ -1633,7 +1633,7 @@ class AdaptiveJobBERTMatcher:
                 
                 return final_score
         
-            except Exception as e:
+    except Exception as e:
                 logger.warning(f"JobBERT semantic matching failed: {e}")
                 # Fallback to lexical only with stricter threshold
                 return final_combined_score if final_combined_score >= 0.4 else 0.1
@@ -1870,7 +1870,7 @@ def scrape_linkedin_with_adaptive_jobbert(keyword, location, filters_dict, max_p
             if ai_match_score > 0:
                 pre_filtered_jobs.append(job)
                 logger.debug(f"✅ PRE-FILTER PASS: '{job['Title']}' (AI score: {ai_match_score})")
-            else:
+    else:
                 logger.debug(f"❌ PRE-FILTER FAIL: '{job['Title']}' (No AI keywords found in title)")
         
         logger.info(f"🎯 PRE-FILTER RESULTS: {len(all_scraped_jobs)} → {len(pre_filtered_jobs)} jobs after AI keyword filtering")
