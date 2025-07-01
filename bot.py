@@ -2197,7 +2197,7 @@ def scrape_linkedin_with_adaptive_jobbert(
         is_interactive_search = user_id and not str(user_id).startswith(
             "scheduler_"
         )
-        if is_interactive_search and not is_user_busy(user_id, "search"):
+        if is_interactive_search and not is_user_busy(user_id):
             logger.info(f"Search cancelled for user {user_id}")
             break
 
