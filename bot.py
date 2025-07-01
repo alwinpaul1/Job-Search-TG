@@ -6,7 +6,6 @@ import json
 import sqlite3
 import html
 import threading
-import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 import telegram
@@ -76,7 +75,6 @@ user_operations_lock = threading.Lock()
 
 # Optional imports for enhanced features
 try:
-    from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.metrics.pairwise import cosine_similarity
     SKLEARN_AVAILABLE = True
 except ImportError:
@@ -212,8 +210,8 @@ def safe_edit_message(query, text, reply_markup=None, parse_mode=None, disable_w
     MAIN_MENU, PREFERENCES_MENU, GET_SEARCH_KEYWORD, GET_SEARCH_LOCATION,
     EXPERIENCE_MENU, JOB_TYPE_MENU, DATE_POSTED_MENU, WORKPLACE_MENU, BROWSING,
     ALERTS_MENU, MY_ALERTS, ADD_ALERT_KEYWORD, ADD_ALERT_LOCATION, ALERT_PREFERENCES,
-    EDIT_ALERT_PREFERENCES, SET_TIMEZONE
-) = range(16)
+    EDIT_ALERT_PREFERENCES, SET_TIMEZONE, GET_KEYWORD, GET_LOCATION
+) = range(18)
 
 JOBS_PER_PAGE = 5
 MAX_SCRAPE_PAGES = 5
@@ -275,10 +273,12 @@ def init_db():
         logger.info("Upgrading sent_jobs table: adding job_title and company columns...")
         try:
             cursor.execute("ALTER TABLE sent_jobs ADD COLUMN job_title TEXT NOT NULL DEFAULT 'N/A'")
-        except sqlite3.OperationalError: pass # Column might exist from a partial migration
+        except sqlite3.OperationalError:
+            pass  # Column might exist from a partial migration
         try:
             cursor.execute("ALTER TABLE sent_jobs ADD COLUMN company TEXT NOT NULL DEFAULT 'N/A'")
-        except sqlite3.OperationalError: pass # Column might exist
+        except sqlite3.OperationalError:
+            pass  # Column might exist
 
     # Check and add new columns for robust deduplication
     columns_to_add = [
@@ -497,7 +497,6 @@ def make_multi_select_menu(context: CallbackContext, menu_type: str) -> (str, In
 # --- Start & Main Menu ---
 def start(update: Update, context: CallbackContext):
     # Debounce the /start command
-    user_id = update.effective_user.id
     now = time.time()
     last_call = context.user_data.get('last_start_call', 0)
     if now - last_call < 2:
@@ -698,11 +697,16 @@ def toggle_multi_select_option(update: Update, context: CallbackContext, menu_ty
 def parse_date_posted(date_str):
     date_str = date_str.lower().strip()
     now = datetime.now()
-    if 'hour' in date_str: return now - timedelta(hours=int(re.search(r'\d+', date_str).group()))
-    if 'day' in date_str: return now - timedelta(days=int(re.search(r'\d+', date_str).group()))
-    if 'week' in date_str: return now - timedelta(weeks=int(re.search(r'\d+', date_str).group()))
-    if 'month' in date_str: return now - timedelta(days=30 * int(re.search(r'\d+', date_str).group()))
-    if 'year' in date_str: return now - timedelta(days=365 * int(re.search(r'\d+', date_str).group()))
+    if 'hour' in date_str:
+        return now - timedelta(hours=int(re.search(r'\d+', date_str).group()))
+    if 'day' in date_str:
+        return now - timedelta(days=int(re.search(r'\d+', date_str).group()))
+    if 'week' in date_str:
+        return now - timedelta(weeks=int(re.search(r'\d+', date_str).group()))
+    if 'month' in date_str:
+        return now - timedelta(days=30 * int(re.search(r'\d+', date_str).group()))
+    if 'year' in date_str:
+        return now - timedelta(days=365 * int(re.search(r'\d+', date_str).group()))
     return now
 
 def create_paginated_job_message(jobs, page):
@@ -723,7 +727,8 @@ def create_paginated_job_message(jobs, page):
         message_text += f"Posted: {date_posted}\n"
         message_text += f"<a href='{job['Link']}'>View Job</a>\n\n"
 
-    if not jobs[start_index:end_index]: return "No jobs to display.", None
+    if not jobs[start_index:end_index]:
+        return "No jobs to display.", None
 
     row = []
     if page > 0:
@@ -853,7 +858,7 @@ class JobRelevanceEngine:
                 return 0.5
             else:
                 return 0.1
-        except:
+        except Exception:
             return 0.3  # Default for unparseable dates
 
     def _calculate_exclusion_penalty(self, job):
@@ -1334,7 +1339,6 @@ class AdaptiveJobBERTMatcher:
         sim_std = float(similarities.std())
         sim_median = float(np.median(similarities))
         sim_75th = float(np.percentile(similarities, 75))
-        sim_90th = float(np.percentile(similarities, 90))
 
         # --- Step 4: Adaptive Base Threshold Selection ---
         # Use percentile-based approach for more robust thresholding
@@ -1483,7 +1487,7 @@ class AdaptiveJobBERTMatcher:
                 logger.debug(f"Domain-specific query: using title-only keyword matching for '{job['Title']}'")
             else:
                 job_words = set(f"{job['Title']} {job['Company']}".lower().split())  # Include company for general queries
-                logger.debug(f"General query: using title+company keyword matching")
+                logger.debug("General query: using title+company keyword matching")
 
             # Enhanced keyword matching
             exact_matches = len(query_words.intersection(job_words))
@@ -1577,7 +1581,7 @@ class AdaptiveJobBERTMatcher:
                 return 0.5
             else:
                 return 0.1
-        except:
+        except Exception:
             return 0.3  # Default for unparseable dates
 
     def _calculate_enhanced_job_quality(self, job):
@@ -1885,7 +1889,7 @@ def scrape_linkedin_with_adaptive_jobbert(keyword, location, filters_dict, max_p
 
             progress_text = (
                 f"🔍 **Searching LinkedIn** {pulse_char}\n\n"
-                f"⏳ _Finding relevant opportunities..._"
+                "⏳ _Finding relevant opportunities..._"
             )
             safe_progress_update(progress_msg, progress_text, ParseMode.MARKDOWN)
 
@@ -2000,7 +2004,7 @@ def scrape_linkedin_with_adaptive_jobbert(keyword, location, filters_dict, max_p
         loading_char = loading_chars[2]  # Use different character for progress
         progress_text = (
             f"🤖 **AI Filtering** {loading_char}\n\n"
-            f"🧠 _Applying semantic analysis..._"
+            "🧠 _Applying semantic analysis..._"
         )
         safe_progress_update(progress_msg, progress_text, ParseMode.MARKDOWN)
 
@@ -2008,7 +2012,7 @@ def scrape_linkedin_with_adaptive_jobbert(keyword, location, filters_dict, max_p
     final_jobs = adaptive_matcher.calculate_adaptive_relevance(jobs_to_analyze, keyword)
 
     # Enhanced final logging
-    logger.info(f"🎯 FINAL FILTERING RESULTS:")
+    logger.info("🎯 FINAL FILTERING RESULTS:")
     logger.info(f"   📊 Original scraped: {len(all_scraped_jobs)}")
     logger.info(f"   🎯 After pre-filter: {len(jobs_to_analyze)}")
     logger.info(f"   ✅ Final relevant: {len(final_jobs)}")
@@ -2016,7 +2020,7 @@ def scrape_linkedin_with_adaptive_jobbert(keyword, location, filters_dict, max_p
 
     # Log some examples of what passed/failed
     if final_jobs:
-        logger.info(f"🎉 TOP MATCHES:")
+        logger.info("🎉 TOP MATCHES:")
         for i, job in enumerate(final_jobs[:3]):
             score = job.get('final_score', 0)
             logger.info(f"   {i+1}. '{job['Title']}' at {job['Company']} (score: {score:.3f})")
@@ -2028,7 +2032,7 @@ def scrape_linkedin_with_adaptive_jobbert(keyword, location, filters_dict, max_p
         loading_char = loading_chars[5]  # Use different character for final stage
         completion_text = (
             f"✅ **AI Filtering Complete** {loading_char}\n\n"
-            f"🚀 _Preparing your results..._"
+            "🚀 _Preparing your results..._"
         )
         safe_progress_update(progress_msg, completion_text, ParseMode.MARKDOWN)
 
@@ -2040,7 +2044,6 @@ def scrape_linkedin_with_adaptive_jobbert(keyword, location, filters_dict, max_p
 def run_scrape_threaded(update: Update, context: CallbackContext, progress_msg):
     """Thread-safe version of run_scrape that doesn't block other users."""
     user_id = update.effective_user.id
-    chat_id = update.message.chat_id
 
     try:
         # Get transient search terms and persistent preferences
@@ -2073,14 +2076,14 @@ def run_scrape_threaded(update: Update, context: CallbackContext, progress_msg):
             if progress_msg:
                 try:
                     progress_msg.edit_reply_markup(reply_markup=kbd)
-                except:
+                except Exception:
                     pass
             return
 
         # Show final results with nice formatting
         results_text = (
-            f"🎉 **Search Complete!**\n\n"
-            f"📋 _Loading your job listings..._"
+            "🎉 **Search Complete!**\n\n"
+            "📋 _Loading your job listings..._"
         )
         safe_progress_update(progress_msg, results_text, ParseMode.MARKDOWN)
         time.sleep(1)
@@ -2187,7 +2190,6 @@ def alert_skip_filters(update: Update, context: CallbackContext):
     query.answer()
 
     user_id = query.from_user.id
-    chat_id = query.from_user.id
     keywords = context.user_data.get('alert_keywords')
     location = context.user_data.get('alert_location')
 
@@ -2275,7 +2277,7 @@ def setup_alert_threaded(query, context, keywords, location, prefs):
         logger.error(f"Failed to setup alert for user {user_id}: {e}")
         try:
             query.edit_message_text(f"❌ Failed to setup alert: {str(e)}")
-        except:
+        except Exception:
             pass
     finally:
         # Always unregister the operation
@@ -2343,7 +2345,6 @@ def alert_save_final(update: Update, context: CallbackContext):
     query.answer()
 
     user_id = query.from_user.id
-    chat_id = query.from_user.id
     keywords = context.user_data.get('alert_keywords')
     location = context.user_data.get('alert_location')
     prefs = get_alert_prefs(context)
@@ -2542,7 +2543,6 @@ def my_alerts(update: Update, context: CallbackContext):
 
     for alert in alerts:
         status_icon = "🟢" if alert['is_active'] else "🔴"
-        status_text = "Active" if alert['is_active'] else "Paused"
 
         # Clean, condensed alert display
         alert_line = f"{status_icon} {alert['keywords']} • {alert['location']}"
@@ -2737,7 +2737,6 @@ def make_edit_alert_preferences_menu(context: CallbackContext) -> (str, InlineKe
     prefs = get_alert_prefs(context)
     keywords = context.user_data.get('alert_keywords', 'N/A')
     location = context.user_data.get('alert_location', 'N/A')
-    alert_id = context.user_data.get('editing_alert_id', 'N/A')
 
     experience = ", ".join(prefs['experience'].keys()) or "Any"
     job_types = ", ".join(prefs['job_types'].keys()) or "Any"
