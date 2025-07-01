@@ -2919,21 +2919,21 @@ def check_all_alerts(bot: Bot):
             try:
                 future.result(timeout=300)  # 5 minute timeout per alert
             except Exception as e:
-                logger.error(f"Alert check failed: {e}")
+                logger.exception("Alert check failed")
 
     logger.info("Scheduler finished checking alerts.")
 
 def check_single_alert(alert, bot: Bot):
     """Check a single alert - thread-safe."""
     try:
-        logger.info(f"Checking alert ID {alert['id']} for chat ID {alert['chat_id']}...")
+        logger.info("Checking alert ID %s for chat ID %s...", alert["id"], alert["chat_id"])
         filters = json.loads(alert["filters"])
 
         filter_dict = {
             "f_E": ",".join(filters["experience"].values()),
             "f_JT": ",".join(filters["job_types"].values()),
-            "f_TPR": list(filters["date_posted"].values())[0] if filters["date_posted"] else None,
-            "f_WT": list(filters["workplace"].values())[0] if filters["workplace"] else None,
+            "f_TPR": next(iter(filters["date_posted"].values())) if filters["date_posted"] else None,
+            "f_WT": next(iter(filters["workplace"].values())) if filters["workplace"] else None,
         }
 
         # Scrape all pages dynamically and apply AI semantic matching
@@ -2959,7 +2959,7 @@ def check_single_alert(alert, bot: Bot):
             try:
                 last_checked = datetime.strptime(alert["last_checked"].split(".")[0], "%Y-%m-%d %H:%M:%S").replace(tzinfo=pytz.UTC)
             except ValueError:
-                logger.warning(f"Could not parse last_checked timestamp for alert {alert['id']}")
+                logger.warning("Could not parse last_checked timestamp for alert %s", alert["id"])
 
         new_jobs_found = 0
         for job in found_jobs:
@@ -3026,12 +3026,12 @@ def check_single_alert(alert, bot: Bot):
 
                     time.sleep(1.2)  # Rate limit: max 20 messages per 30 seconds per chat
                 except telegram.error.BadRequest as e:
-                    logger.error(f"Failed to send alert to {alert['chat_id']}: {e}")
+                    logger.exception("Failed to send alert to %s", alert["chat_id"])
                 except Exception as e:
-                    logger.error(f"An unexpected error occurred sending to {alert['chat_id']}: {e}")
+                    logger.exception("An unexpected error occurred sending to %s", alert["chat_id"])
 
         if new_jobs_found > 0:
-            logger.info(f"Sent {new_jobs_found} new job(s) for alert ID {alert['id']}.")
+            logger.info("Sent %s new job(s) for alert ID %s.", new_jobs_found, alert["id"])
 
         # Update last_checked timestamp
         cursor.execute("UPDATE alerts SET last_checked = CURRENT_TIMESTAMP WHERE id = ?", (alert["id"],))
@@ -3041,7 +3041,7 @@ def check_single_alert(alert, bot: Bot):
         time.sleep(2)  # Reduced stagger time since we're running concurrently
 
     except Exception as e:
-        logger.error(f"Failed to check alert {alert['id']}: {e}")
+        logger.exception("Failed to check alert %s", alert["id"])
 
 # --- New Timezone Functions ---
 def set_timezone_start(update: Update, context: CallbackContext):
@@ -3109,7 +3109,7 @@ def main():
 
     # Exit early if only migration was requested
     if args.migrate_only:
-        print("✅ Migration completed – exiting as requested.")
+        print("✅ Migration completed - exiting as requested.")
         print("🚀 You can now start the bot normally with: python bot.py")
         sys.exit(0)
 
@@ -3130,9 +3130,9 @@ def main():
         if isinstance(context.error, telegram.error.TimedOut):
             logger.warning("Telegram timeout error occurred")
         elif isinstance(context.error, telegram.error.BadRequest):
-            logger.warning(f"Telegram BadRequest error: {context.error}")
+            logger.warning("Telegram BadRequest error: %s", context.error)
         else:
-            logger.error(f"Unexpected error: {context.error}")
+            logger.error("Unexpected error: %s", context.error)
 
     dispatcher.add_error_handler(error_handler)
 
