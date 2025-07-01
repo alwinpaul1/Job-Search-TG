@@ -2918,7 +2918,7 @@ def check_all_alerts(bot: Bot):
         for future in futures:
             try:
                 future.result(timeout=300)  # 5 minute timeout per alert
-            except Exception as e:
+            except Exception:
                 logger.exception("Alert check failed")
 
     logger.info("Scheduler finished checking alerts.")
@@ -3025,9 +3025,9 @@ def check_single_alert(alert, bot: Bot):
                     sent_canonical_pairs.add((canonical_title, canonical_company))
 
                     time.sleep(1.2)  # Rate limit: max 20 messages per 30 seconds per chat
-                except telegram.error.BadRequest as e:
+                except telegram.error.BadRequest:
                     logger.exception("Failed to send alert to %s", alert["chat_id"])
-                except Exception as e:
+                except Exception:
                     logger.exception("An unexpected error occurred sending to %s", alert["chat_id"])
 
         if new_jobs_found > 0:
@@ -3040,7 +3040,7 @@ def check_single_alert(alert, bot: Bot):
 
         time.sleep(2)  # Reduced stagger time since we're running concurrently
 
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to check alert %s", alert["id"])
 
 # --- New Timezone Functions ---
