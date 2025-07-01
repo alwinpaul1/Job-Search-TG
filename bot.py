@@ -331,7 +331,7 @@ def init_db():
         ("job_id", "TEXT NOT NULL DEFAULT ''"),
         ("canonical_title", "TEXT NOT NULL DEFAULT ''"),
         ("canonical_company", "TEXT NOT NULL DEFAULT ''"),
-        ("sent_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+        ("sent_at", "TIMESTAMP"),
     ]
 
     for col_name, col_def in columns_to_add:
@@ -2194,7 +2194,10 @@ def scrape_linkedin_with_adaptive_jobbert(
     page_number = 0
 
     while True:
-        if user_id and not is_user_busy(user_id, "search"):
+        is_interactive_search = user_id and not str(user_id).startswith(
+            "scheduler_"
+        )
+        if is_interactive_search and not is_user_busy(user_id, "search"):
             logger.info(f"Search cancelled for user {user_id}")
             break
 
@@ -2692,8 +2695,8 @@ def setup_alert_threaded(query, context, keywords, location, prefs):
             cursor.execute("""
                 INSERT OR IGNORE INTO sent_jobs
                 (alert_id, chat_id, job_link, job_id, job_title, company,
-                 canonical_title, canonical_company)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 canonical_title, canonical_company, sent_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             """, (
                 alert_id, chat_id, job["Link"], job_id, job["Title"],
                 job["Company"], canonical_title, canonical_company
@@ -3732,8 +3735,8 @@ def check_single_alert(alert, bot: Bot):
                     cursor.execute("""
                         INSERT OR IGNORE INTO sent_jobs
                         (alert_id, chat_id, job_link, job_id, job_title,
-                         company, canonical_title, canonical_company)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                         company, canonical_title, canonical_company, sent_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                     """, (
                         alert["id"], alert["chat_id"], job["Link"], job_id,
                         job["Title"], job["Company"], canonical_title,
