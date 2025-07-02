@@ -700,10 +700,9 @@ def location_received(update: Update, context: CallbackContext):
     register_user_operation(user_id, "search")
 
     # Run search in background thread
-    future = run_concurrent_operation(
+    run_concurrent_operation(
         run_scrape_threaded, update, context, progress_msg
     )
-    context.user_data["search_future"] = future
 
     return Browse
 
@@ -2537,6 +2536,9 @@ def ignore_callback(update: Update, context: CallbackContext):
 def close_Browse(update: Update, context: CallbackContext):
     query = update.callback_query
     safe_answer_callback_query(query)
+    # Clear search results to free up memory
+    context.user_data.pop("jobs", None)
+    context.user_data.pop("page", None)
     return main_menu(update, context)
 
 
@@ -2635,10 +2637,9 @@ def alert_skip_filters(update: Update, context: CallbackContext):
         "📡 Setting up your alert and checking for existing jobs..."
     )
 
-    future = run_concurrent_operation(
+    run_concurrent_operation(
         setup_alert_threaded, query, context, keywords, location, {}
     )
-    context.user_data["alert_future"] = future
 
     return MAIN_MENU
 
@@ -2685,7 +2686,7 @@ def setup_alert_threaded(query, context, keywords, location, prefs):
 
         baseline_jobs = scrape_linkedin_with_adaptive_jobbert(
             keywords, location, filter_dict,
-            progress_msg=None, user_id=user_id,
+            progress_msg=None, user_id=user_id
         )
 
         for job in baseline_jobs:
@@ -2845,10 +2846,9 @@ def alert_save_final(update: Update, context: CallbackContext):
         "📡 Setting up your alert and checking for existing jobs..."
     )
 
-    future = run_concurrent_operation(
+    run_concurrent_operation(
         setup_alert_threaded, query, context, keywords, location, prefs
     )
-    context.user_data["alert_future"] = future
 
     context.user_data.pop("alert_keywords", None)
     context.user_data.pop("alert_location", None)
@@ -3375,38 +3375,155 @@ def make_edit_alert_preferences_menu(
 
 
 def edit_alert_save_final(update: Update, context: CallbackContext):
-    """Save the updated alert preferences."""
+    """Save the updated alert preferences and refresh the baseline."""
     query = update.callback_query
     query.answer()
 
+    user_id = query.from_user.id
     alert_id = context.user_data.get("editing_alert_id")
     keywords = context.user_data.get("alert_keywords")
     location = context.user_data.get("alert_location")
     prefs = get_alert_prefs(context)
-    filters_json = json.dumps(prefs)
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "UPDATE alerts SET filters = ? WHERE id = ?",
-        (filters_json, alert_id),
+    if is_user_busy(user_id, "alert_update"):
+        query.edit_message_text(
+            "⏳ Alert update already in progress. Please wait..."
+        )
+        return EDIT_ALERT_PREFERENCES
+
+    register_user_operation(user_id, "alert_update")
+
+    query.edit_message_text(
+        "📡 Updating your alert and re-scanning for existing jobs with "
+        "the new filters..."
     )
-    conn.commit()
-    conn.close()
+
+    run_concurrent_operation(
+        update_alert_baseline_threaded, query, context, alert_id,
+        keywords, location, prefs
+    )
 
     context.user_data.pop("editing_alert_id", None)
     context.user_data.pop("alert_keywords", None)
     context.user_data.pop("alert_location", None)
     context.user_data.pop("alert_preferences", None)
 
-    message = (
-        f"✅ Alert preferences for '{keywords}' in '{location}' "
-        "have been updated successfully!"
-    )
-    query.edit_message_text(message)
+    return EDIT_ALERT_PREFERENCES
 
-    time.sleep(2)
-    return my_alerts(update, context)
+
+def update_alert_baseline_threaded(
+    query, context, alert_id, keywords, location, prefs
+):
+    """Thread-safe alert update that refreshes the baseline jobs."""
+    user_id = query.from_user.id
+    chat_id = query.from_user.id
+    conn = None
+
+    try:
+        # 1. Update the filters in the database
+        filters_json = json.dumps(prefs)
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE alerts SET filters = ? WHERE id = ?",
+            (filters_json, alert_id),
+        )
+        conn.commit()
+
+        # 2. Scrape for jobs with new filters
+        date_posted_value = None
+        if prefs.get("date_posted"):
+            date_posted_value = list(prefs["date_posted"].values())[0]
+
+        workplace_value = None
+        if prefs.get("workplace"):
+            workplace_value = list(prefs["workplace"].values())[0]
+
+        filter_dict = {
+            "f_E": ",".join(prefs.get("experience", {}).values()),
+            "f_JT": ",".join(prefs.get("job_types", {}).values()),
+            "f_TPR": date_posted_value,
+            "f_WT": workplace_value,
+        }
+
+        baseline_jobs = scrape_linkedin_with_adaptive_jobbert(
+            keywords, location, filter_dict, progress_msg=None,
+            user_id=user_id
+        )
+
+        cursor.execute(
+            "SELECT job_id, canonical_title, canonical_company "
+            "FROM sent_jobs WHERE chat_id = ?",
+            (chat_id,)
+        )
+        sent_jobs = cursor.fetchall()
+        sent_job_ids = {row["job_id"] for row in sent_jobs}
+        sent_canonical_pairs = {
+            (row["canonical_title"], row["canonical_company"])
+            for row in sent_jobs
+        }
+
+        new_jobs_to_insert = []
+        for job in baseline_jobs:
+            job_id = canonical_link(job["Link"])
+            canonical_title = canonical_text(job["Title"])
+            canonical_company = canonical_text(job["Company"])
+
+            is_duplicate = (
+                job_id in sent_job_ids or
+                (canonical_title, canonical_company) in sent_canonical_pairs
+            )
+
+            if not is_duplicate:
+                new_jobs_to_insert.append(
+                    (
+                        alert_id, chat_id, job["Link"], job_id,
+                        job["Title"], job["Company"], canonical_title,
+                        canonical_company
+                    )
+                )
+
+        if new_jobs_to_insert:
+            cursor.executemany("""
+                INSERT OR IGNORE INTO sent_jobs
+                (alert_id, chat_id, job_link, job_id, job_title,
+                 company, canonical_title, canonical_company, sent_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, new_jobs_to_insert)
+            conn.commit()
+
+        logger.info(
+            "Populated %s new baseline jobs for updated alert ID %s",
+            len(new_jobs_to_insert), alert_id
+        )
+
+        try:
+            message = (
+                f"✅ Alert for '{keywords}' in '{location}' has been "
+                f"updated. I've recorded {len(new_jobs_to_insert)} new "
+                "existing jobs based on your new preferences. You'll only get "
+                "notified about truly new opportunities!"
+            )
+            keyboard = [[InlineKeyboardButton(
+                "⬅️ Back to Alerts", callback_data="my_alerts"
+            )]]
+            query.edit_message_text(
+                message, reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to update alert success message: {e}")
+
+    except Exception as e:
+        logger.error(f"Failed to update alert for user {user_id}: {e}")
+        try:
+            query.edit_message_text(f"❌ Failed to update alert: {e!s}")
+        except Exception:
+            pass
+    finally:
+        unregister_user_operation(user_id, "alert_update")
+        if conn:
+            conn.close()
 
 
 def edit_alert_preferences_done(update: Update, context: CallbackContext):
@@ -3617,6 +3734,7 @@ def check_all_alerts(bot: Bot):
 
 def check_single_alert(alert, bot: Bot):
     """Check a single alert - thread-safe."""
+    conn = None
     try:
         logger.info(
             "Checking alert ID %s for chat ID %s...",
@@ -3671,7 +3789,7 @@ def check_single_alert(alert, bot: Bot):
                     alert["id"]
                 )
 
-        new_jobs_found = 0
+        jobs_to_send = []
         for job in found_jobs:
             job_id = canonical_link(job["Link"])
             canonical_title = canonical_text(job["Title"])
@@ -3700,70 +3818,79 @@ def check_single_alert(alert, bot: Bot):
                     )
 
             if not is_duplicate:
-                new_jobs_found += 1
-                title = html.escape(job["Title"])
-                company = html.escape(job["Company"])
-                location = html.escape(job["Location"])
-                date_posted = html.escape(job["Date Posted"])
-                keywords = html.escape(alert["keywords"])
-                alert_location = html.escape(alert["location"])
+                # Store processed canonical data to avoid recomputation
+                job_with_meta = {
+                    **job,
+                    "_job_id": job_id,
+                    "_canonical_title": canonical_title,
+                    "_canonical_company": canonical_company
+                }
+                jobs_to_send.append(job_with_meta)
 
-                message = (
-                    "🔔 <b>New Job Alert!</b>\n\n"
-                    f"<b>{title}</b>\n"
-                    f"<i>{company}</i> - {location}\n"
-                    f"Posted: {date_posted}\n\n"
-                    f"From your alert for: <b>{keywords}</b> in "
-                    f"<b>{alert_location}</b>"
-                )
-                keyboard = [
-                    [
-                        InlineKeyboardButton("View Job", url=job["Link"]),
-                        InlineKeyboardButton(
-                            "📋 My Alerts", callback_data="my_alerts"
-                        )
-                    ]
+        new_jobs_to_insert_db = []
+        for job in jobs_to_send:
+            title = html.escape(job["Title"])
+            company = html.escape(job["Company"])
+            location = html.escape(job["Location"])
+            date_posted = html.escape(job["Date Posted"])
+            keywords = html.escape(alert["keywords"])
+            alert_location = html.escape(alert["location"])
+
+            message = (
+                "🔔 <b>New Job Alert!</b>\n\n"
+                f"<b>{title}</b>\n"
+                f"<i>{company}</i> - {location}\n"
+                f"Posted: {date_posted}\n\n"
+                f"From your alert for: <b>{keywords}</b> in "
+                f"<b>{alert_location}</b>"
+            )
+            keyboard = [
+                [
+                    InlineKeyboardButton("View Job", url=job["Link"]),
+                    InlineKeyboardButton(
+                        "📋 My Alerts", callback_data="my_alerts"
+                    )
                 ]
+            ]
 
-                try:
-                    bot.send_message(
-                        chat_id=alert["chat_id"],
-                        text=message,
-                        reply_markup=InlineKeyboardMarkup(keyboard),
-                        parse_mode=ParseMode.HTML,
-                    )
-                    cursor.execute("""
-                        INSERT OR IGNORE INTO sent_jobs
-                        (alert_id, chat_id, job_link, job_id, job_title,
-                         company, canonical_title, canonical_company, sent_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    """, (
-                        alert["id"], alert["chat_id"], job["Link"], job_id,
-                        job["Title"], job["Company"], canonical_title,
-                        canonical_company
-                    ))
-                    conn.commit()
+            try:
+                bot.send_message(
+                    chat_id=alert["chat_id"],
+                    text=message,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode=ParseMode.HTML,
+                )
 
-                    sent_job_ids.add(job_id)
-                    sent_canonical_pairs.add(
-                        (canonical_title, canonical_company)
+                # Use pre-computed canonical data
+                new_jobs_to_insert_db.append(
+                    (
+                        alert["id"], alert["chat_id"], job["Link"],
+                        job["_job_id"], job["Title"], job["Company"],
+                        job["_canonical_title"], job["_canonical_company"]
                     )
+                )
 
-                    time.sleep(1.2)
-                except telegram.error.BadRequest:
-                    logger.exception(
-                        "Failed to send alert to %s", alert["chat_id"]
-                    )
-                except Exception:
-                    logger.exception(
-                        "An unexpected error occurred sending to %s",
-                        alert["chat_id"]
-                    )
+                time.sleep(1.2)
+            except telegram.error.BadRequest:
+                logger.exception(
+                    "Failed to send alert to %s", alert["chat_id"]
+                )
+            except Exception:
+                logger.exception(
+                    "An unexpected error occurred sending to %s",
+                    alert["chat_id"]
+                )
 
-        if new_jobs_found > 0:
+        if new_jobs_to_insert_db:
+            cursor.executemany("""
+                INSERT OR IGNORE INTO sent_jobs
+                (alert_id, chat_id, job_link, job_id, job_title,
+                 company, canonical_title, canonical_company, sent_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, new_jobs_to_insert_db)
             logger.info(
-                "Sent %s new job(s) for alert ID %s.",
-                new_jobs_found, alert["id"]
+                "Sent and recorded %s new job(s) for alert ID %s.",
+                len(new_jobs_to_insert_db), alert["id"]
             )
 
         cursor.execute(
@@ -3777,6 +3904,9 @@ def check_single_alert(alert, bot: Bot):
 
     except Exception:
         logger.exception("Failed to check alert %s", alert["id"])
+    finally:
+        if conn:
+            conn.close()
 
 
 # --- New Timezone Functions ---
