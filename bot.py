@@ -2377,9 +2377,16 @@ def scrape_linkedin_with_adaptive_jobbert(
         )
         safe_progress_update(progress_msg, progress_text, ParseMode.MARKDOWN)
 
-    final_jobs = adaptive_matcher.calculate_adaptive_relevance(
-        jobs_to_analyze, keyword
-    )
+    try:
+        final_jobs = adaptive_matcher.calculate_adaptive_relevance(
+            jobs_to_analyze, keyword
+        )
+    except Exception as e:
+        logger.error(f"🚨 AdaptiveJobBERTMatcher failed: {e}", exc_info=True)
+        logger.warning("⚠️ Falling back to basic filtering due to error.")
+        final_jobs = adaptive_matcher._fallback_basic_filter(
+            jobs_to_analyze, keyword
+        )
 
     logger.info("🎯 FINAL FILTERING RESULTS:")
     logger.info(f"   📊 Original scraped: {len(all_scraped_jobs)}")
