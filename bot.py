@@ -1435,6 +1435,7 @@ class UltraPureDynamicClassifier:
 # Global model instance to avoid reloading
 _global_jobbert_model = None
 _model_load_attempted = False
+_global_adaptive_matcher = None
 
 
 def get_jobbert_model():
@@ -1466,6 +1467,18 @@ def get_jobbert_model():
             logger.error(f"❌ Failed to load fallback model: {e2}")
             _global_jobbert_model = None
             return None
+
+
+def get_adaptive_matcher():
+    """Get or create the AdaptiveJobBERTMatcher singleton"""
+    global _global_adaptive_matcher
+
+    if _global_adaptive_matcher is None:
+        logger.info("🔧 Creating AdaptiveJobBERTMatcher instance...")
+        _global_adaptive_matcher = AdaptiveJobBERTMatcher()
+        logger.info("✅ AdaptiveJobBERTMatcher created successfully")
+
+    return _global_adaptive_matcher
 
 
 class AdaptiveJobBERTMatcher:
@@ -2316,7 +2329,7 @@ def scrape_linkedin_with_adaptive_jobbert(
             ParseMode.MARKDOWN
         )
 
-    adaptive_matcher = AdaptiveJobBERTMatcher()
+    adaptive_matcher = get_adaptive_matcher()
 
     logger.info(f"🔍 FILTER DEBUG: Starting analysis of query '{keyword}'")
 
