@@ -71,6 +71,7 @@ executor = ThreadPoolExecutor(max_workers=10)
 
 # Global lock for database operations
 db_lock = threading.Lock()
+ai_lock = threading.Lock()  # Global lock for AI operations
 
 # User-specific operation tracking
 user_operations = {}
@@ -2448,7 +2449,7 @@ def scrape_linkedin_with_adaptive_jobbert(
 def run_scrape_threaded(
     update: Update, context: CallbackContext, progress_msg
 ):
-    """Thread-safe version of run_scrape that doesn't block other users."""
+    """Thread-safe version of run_scrape that notifies the user if the AI is busy."""
     user_id = update.effective_user.id
 
     try:
@@ -2456,73 +2457,79 @@ def run_scrape_threaded(
         search_location = context.user_data.get("search_location")
         prefs = get_user_prefs(context)
 
-        date_posted_value = None
-        if prefs["date_posted"]:
-            date_posted_value = list(prefs["date_posted"].values())[0]
-
-        workplace_value = None
-        if prefs["workplace"]:
-            workplace_value = list(prefs["workplace"].values())[0]
-
         filters = {
             "f_E": ",".join(prefs["experience"].values()),
             "f_JT": ",".join(prefs["job_types"].values()),
-            "f_TPR": date_posted_value,
-            "f_WT": workplace_value,
+            "f_TPR": list(prefs["date_posted"].values())[0] if prefs["date_posted"] else None,
+            "f_WT": list(prefs["workplace"].values())[0] if prefs["workplace"] else None,
         }
 
-        safe_progress_update(
-            progress_msg,
-            "🔍 **Starting Search** ⠋\n\n⏳ _Connecting to LinkedIn..._",
-            ParseMode.MARKDOWN
-        )
+        logger.info(f"User {user_id} is attempting to start a live search.")
 
-        sorted_jobs = scrape_linkedin_with_adaptive_jobbert(
-            search_keyword, search_location, filters,
-            progress_msg=progress_msg, user_id=user_id,
-        )
-
-        if not sorted_jobs:
+        # Try to acquire the lock without blocking
+        if not ai_lock.acquire(blocking=False):
+            # The lock is busy. Notify the user and then wait.
+            logger.info(f"AI lock is busy. Notifying user {user_id} that they are queued.")
             safe_progress_update(
                 progress_msg,
-                "Search complete. No jobs found with these criteria."
+                "⏳ **Please Wait...**\n\nThe bot is processing a background task. "
+                "Your search has been queued and will begin shortly!",
+                ParseMode.MARKDOWN
             )
-            time.sleep(2)
-            text, kbd = make_main_menu(context)
-            safe_progress_update(progress_msg, text)
+            # Now, block and wait until the lock is released.
+            ai_lock.acquire()
+            logger.info(f"AI lock acquired for user {user_id} after waiting.")
+
+        # At this point, we are GUARANTEED to have the lock.
+        try:
+            # Notify the user that their search is now actively running.
+            safe_progress_update(
+                progress_msg,
+                "🚀 **Your search is now running...**\n\n"
+                "🔍 _Connecting to LinkedIn..._",
+                ParseMode.MARKDOWN
+            )
+
+            sorted_jobs = scrape_linkedin_with_adaptive_jobbert(
+                search_keyword, search_location, filters,
+                progress_msg=progress_msg, user_id=user_id,
+            )
+
+            if not sorted_jobs:
+                safe_progress_update(progress_msg, "Search complete. No jobs found with these criteria.")
+                time.sleep(2)
+                text, kbd = make_main_menu(context)
+                safe_progress_update(progress_msg, text)
+                if progress_msg:
+                    try:
+                        progress_msg.edit_reply_markup(reply_markup=kbd)
+                    except Exception:
+                        pass
+                return
+
+            results_text = "🎉 **Search Complete!**\n\n📋 _Loading your job listings..._"
+            safe_progress_update(progress_msg, results_text, ParseMode.MARKDOWN)
+            time.sleep(1)
+
+            context.user_data["jobs"] = sorted_jobs
+            context.user_data["page"] = 0
+            message_text, reply_markup = create_paginated_job_message(sorted_jobs, 0)
+
             if progress_msg:
-                try:
-                    progress_msg.edit_reply_markup(reply_markup=kbd)
-                except Exception:
-                    pass
-            return
-
-        results_text = (
-            "🎉 **Search Complete!**\n\n"
-            "📋 _Loading your job listings..._"
-        )
-        safe_progress_update(progress_msg, results_text, ParseMode.MARKDOWN)
-        time.sleep(1)
-
-        context.user_data["jobs"] = sorted_jobs
-        context.user_data["page"] = 0
-        message_text, reply_markup = create_paginated_job_message(
-            sorted_jobs, 0
-        )
-
-        if progress_msg:
-            try:
                 progress_msg.edit_text(
                     text=message_text,
                     reply_markup=reply_markup,
                     parse_mode=ParseMode.HTML,
                     disable_web_page_preview=True,
                 )
-            except Exception as e:
-                logger.error(f"Failed to update final results: {e}")
+
+        finally:
+            # CRUCIAL: Release the lock so other processes can run.
+            logger.info(f"Releasing AI lock for user {user_id}'s search.")
+            ai_lock.release()
 
     except Exception as e:
-        logger.error(f"Search failed for user {user_id}: {e}")
+        logger.error(f"Search failed for user {user_id}: {e}", exc_info=True)
         safe_progress_update(progress_msg, f"❌ Search failed: {e!s}")
     finally:
         unregister_user_operation(user_id, "search")
@@ -3727,27 +3734,22 @@ def edit_alert_toggle_multi_select_option(
 
 def check_all_alerts(bot: Bot):
     """Scheduled job to check all active alerts with robust deduplication."""
-    logger.info("Scheduler running: Checking all active alerts...")
+    logger.info("Scheduler running: Checking all active alerts sequentially...")
 
-    with ThreadPoolExecutor(max_workers=5) as alert_executor:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    active_alerts = cursor.execute(
+        "SELECT * FROM alerts WHERE is_active = 1"
+    ).fetchall()
+    conn.close()
 
-        active_alerts = cursor.execute(
-            "SELECT * FROM alerts WHERE is_active = 1"
-        ).fetchall()
-        conn.close()
-
-        futures = []
-        for alert in active_alerts:
-            future = alert_executor.submit(check_single_alert, alert, bot)
-            futures.append(future)
-
-        for future in futures:
-            try:
-                future.result(timeout=300)
-            except Exception:
-                logger.exception("Alert check failed")
+    # Process alerts one by one instead of in parallel to save memory
+    for alert in active_alerts:
+        try:
+            check_single_alert(alert, bot)
+        except Exception:
+            # Log the error for the specific alert that failed
+            logger.exception(f"Alert check failed for alert ID: {alert['id']}")
 
     logger.info("Scheduler finished checking alerts.")
 
@@ -3778,24 +3780,19 @@ def check_single_alert(alert, bot: Bot):
         }
 
         scheduler_user_id = f"scheduler_{alert['id']}"
-        found_jobs = scrape_linkedin_with_adaptive_jobbert(
-            alert["keywords"], alert["location"], filter_dict,
-            progress_msg=None, user_id=scheduler_user_id,
-        )
+        
+        # Acquire the AI lock before running the scraper.
+        logger.info(f"Background alert {alert['id']} waiting for AI lock...")
+        with ai_lock:
+            logger.info(f"AI lock acquired for background alert {alert['id']}.")
+            found_jobs = scrape_linkedin_with_adaptive_jobbert(
+                alert["keywords"], alert["location"], filter_dict,
+                progress_msg=None, user_id=scheduler_user_id,
+            )
+        logger.info(f"AI lock released for background alert {alert['id']}.")
 
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT job_id, canonical_title, canonical_company "
-            "FROM sent_jobs WHERE chat_id = ?",
-            (alert["chat_id"],)
-        )
-        sent_jobs = cursor.fetchall()
-        sent_job_ids = {row["job_id"] for row in sent_jobs}
-        sent_canonical_pairs = {
-            (row["canonical_title"], row["canonical_company"])
-            for row in sent_jobs
-        }
 
         last_checked = None
         if alert["last_checked"]:
@@ -3815,10 +3812,15 @@ def check_single_alert(alert, bot: Bot):
             canonical_title = canonical_text(job["Title"])
             canonical_company = canonical_text(job["Company"])
 
-            is_duplicate = (
-                job_id in sent_job_ids or
-                (canonical_title, canonical_company) in sent_canonical_pairs
+            # Check for duplicates directly in the database to save memory
+            cursor.execute(
+                """SELECT 1 FROM sent_jobs WHERE
+                   (chat_id = ? AND job_id = ?) OR
+                   (chat_id = ? AND canonical_title = ? AND canonical_company = ?)
+                   LIMIT 1""",
+                (alert["chat_id"], job_id, alert["chat_id"], canonical_title, canonical_company)
             )
+            is_duplicate = cursor.fetchone() is not None
 
             if last_checked and not is_duplicate:
                 try:
