@@ -3840,7 +3840,6 @@ def check_single_alert(alert, bot: Bot):
             found_jobs = scrape_linkedin_with_adaptive_jobbert(
                 alert["keywords"], alert["location"], filter_dict,
                 progress_msg=None, user_id=scheduler_user_id,
-                max_pages=3  # Limit to 3 pages for background alerts to save memory
             )
         finally:
             ai_lock.release()
