@@ -404,11 +404,35 @@ def init_db():
 
 
 def get_db_connection():
-    """Get a database connection with proper locking."""
-    with db_lock:
-        conn = sqlite3.connect("job_alerts.db", check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        return conn
+    """Get a database connection with proper locking and timeout handling."""
+    max_retries = 3
+    retry_delay = 0.1
+    
+    for attempt in range(max_retries):
+        try:
+            with db_lock:
+                conn = sqlite3.connect(
+                    "job_alerts.db", 
+                    check_same_thread=False,
+                    timeout=10.0  # 10 second timeout
+                )
+                conn.row_factory = sqlite3.Row
+                # Enable WAL mode for better concurrency
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute("PRAGMA synchronous=NORMAL;")
+                return conn
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e).lower() and attempt < max_retries - 1:
+                logger.warning(f"Database locked, retrying in {retry_delay}s (attempt {attempt + 1})")
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+                continue
+            else:
+                logger.error(f"Database connection failed after {attempt + 1} attempts: {e}")
+                raise
+        except Exception as e:
+            logger.error(f"Unexpected database error: {e}")
+            raise
 
 
 # --- Data Persistence Helper ---
@@ -1440,8 +1464,11 @@ _global_adaptive_matcher = None
 
 
 def get_jobbert_model():
-    """Get or load the JobBERT model (singleton pattern)"""
+    """Get or load the JobBERT model (singleton pattern with memory protection)"""
     global _global_jobbert_model, _model_load_attempted
+    import gc
+    import psutil
+    import os
 
     if _model_load_attempted:
         return _global_jobbert_model
@@ -1453,7 +1480,16 @@ def get_jobbert_model():
         return None
 
     try:
-        logger.info("🤖 Loading JobBERT-v2 model...")
+        # Check available memory before loading model
+        process = psutil.Process(os.getpid())
+        memory_mb = process.memory_info().rss / 1024 / 1024
+        logger.info(f"Current memory usage: {memory_mb:.1f} MB")
+        
+        if memory_mb > 1000:  # If using more than 1GB, try to free memory
+            gc.collect()
+            logger.warning("High memory usage detected, running garbage collection")
+
+        logger.info("🤖 Loading JobBERT-v2 model (this may take a moment)...")
         _global_jobbert_model = SentenceTransformer("TechWolf/JobBERT-v2")
         logger.info("✅ JobBERT-v2 loaded successfully")
         return _global_jobbert_model
@@ -2182,7 +2218,8 @@ def scrape_linkedin_with_adaptive_jobbert(
     keyword, location, filters_dict,
     max_pages=None, progress_msg=None, user_id=None
 ):
-    """Adaptive JobBERT filtering without hardcoded patterns (thread-safe)."""
+    """Adaptive JobBERT filtering with memory management (thread-safe).""" 
+    import gc
     all_scraped_jobs = []
     seen_job_ids = set()
     seen_canonical_pairs = set()
@@ -2395,6 +2432,13 @@ def scrape_linkedin_with_adaptive_jobbert(
         final_jobs = adaptive_matcher.calculate_adaptive_relevance(
             jobs_to_analyze, keyword
         )
+    except MemoryError as e:
+        logger.error(f"🚨 Memory error in JobBERT processing: {e}")
+        logger.warning("⚠️ Running garbage collection and falling back to basic filtering...")
+        gc.collect()
+        final_jobs = adaptive_matcher._fallback_basic_filter(
+            jobs_to_analyze, keyword
+        )
     except Exception as e:
         logger.error(f"🚨 AdaptiveJobBERTMatcher failed: {e}", exc_info=True)
         logger.warning("⚠️ Falling back to basic filtering due to error.")
@@ -2443,6 +2487,8 @@ def scrape_linkedin_with_adaptive_jobbert(
         reverse=True
     )
 
+    # Clean up memory after processing
+    gc.collect()
     return final_jobs
 
 
@@ -3755,8 +3801,9 @@ def check_all_alerts(bot: Bot):
 
 
 def check_single_alert(alert, bot: Bot):
-    """Check a single alert - thread-safe."""
+    """Check a single alert with enhanced error handling and memory management."""
     conn = None
+    import gc
     try:
         logger.info(
             "Checking alert ID %s for chat ID %s...",
@@ -3781,15 +3828,24 @@ def check_single_alert(alert, bot: Bot):
 
         scheduler_user_id = f"scheduler_{alert['id']}"
         
-        # Acquire the AI lock before running the scraper.
+        # Acquire the AI lock with timeout to prevent deadlocks
         logger.info(f"Background alert {alert['id']} waiting for AI lock...")
-        with ai_lock:
+        lock_acquired = ai_lock.acquire(timeout=300)  # 5 minute timeout
+        if not lock_acquired:
+            logger.error(f"Failed to acquire AI lock for alert {alert['id']} after 5 minutes")
+            return
+            
+        try:
             logger.info(f"AI lock acquired for background alert {alert['id']}.")
             found_jobs = scrape_linkedin_with_adaptive_jobbert(
                 alert["keywords"], alert["location"], filter_dict,
                 progress_msg=None, user_id=scheduler_user_id,
+                max_pages=3  # Limit to 3 pages for background alerts to save memory
             )
-        logger.info(f"AI lock released for background alert {alert['id']}.")
+        finally:
+            ai_lock.release()
+            logger.info(f"AI lock released for background alert {alert['id']}.")
+            gc.collect()  # Clean up memory after processing
 
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -3924,11 +3980,18 @@ def check_single_alert(alert, bot: Bot):
 
         time.sleep(2)
 
-    except Exception:
-        logger.exception("Failed to check alert %s", alert["id"])
+    except MemoryError as e:
+        logger.critical(f"Memory error checking alert {alert['id']}: {e}")
+        gc.collect()
+    except Exception as e:
+        logger.exception(f"Failed to check alert {alert['id']}: {e}")
     finally:
         if conn:
-            conn.close()
+            try:
+                conn.close()
+            except Exception as e:
+                logger.error(f"Error closing database connection: {e}")
+        gc.collect()  # Always clean up memory after alert check
 
 
 # --- New Timezone Functions ---
@@ -3989,6 +4052,20 @@ def timezone_received(update: Update, context: CallbackContext):
 def main():
     import argparse
     import sys
+    import signal
+    import gc
+
+    def signal_handler(signum, frame):
+        logger.info(f"Received signal {signum}, shutting down gracefully...")
+        if 'scheduler' in locals():
+            scheduler.shutdown(wait=False)
+        if 'executor' in globals():
+            executor.shutdown(wait=False)
+        sys.exit(0)
+
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
     parser = argparse.ArgumentParser(description="JobQuestTG Bot")
     parser.add_argument("--migrate-only", action="store_true",
@@ -4001,31 +4078,59 @@ def main():
         logger.error("FATAL: TELEGRAM_BOT_TOKEN not found.")
         return
 
-    init_db()
+    try:
+        init_db()
+    except Exception as e:
+        logger.error(f"Database initialization failed: {e}")
+        return
 
     if args.migrate_only:
         print("✅ Migration completed - exiting as requested.")
         print("🚀 You can now start the bot normally with: python bot.py")
         sys.exit(0)
+        
+    # Force garbage collection to free memory
+    gc.collect()
 
     scheduler = BackgroundScheduler(timezone="UTC")
 
-    bot_instance = Bot(token=token)
-    scheduler.add_job(check_all_alerts, "interval", minutes=30,
-                      args=[bot_instance])
-    scheduler.start()
+    try:
+        bot_instance = Bot(token=token)
+        # Reduce alert check frequency to save resources
+        scheduler.add_job(check_all_alerts, "interval", minutes=60,
+                          args=[bot_instance], max_instances=1)
+        scheduler.start()
+        logger.info("Background scheduler started (checks every 60 minutes)")
+    except Exception as e:
+        logger.error(f"Failed to start scheduler: {e}")
+        return
 
     updater = Updater(token, use_context=True)
     dispatcher = updater.dispatcher
 
     def error_handler(update, context):
-        """Handle errors in the bot."""
-        if isinstance(context.error, telegram.error.TimedOut):
-            logger.warning("Telegram timeout error occurred")
-        elif isinstance(context.error, telegram.error.BadRequest):
-            logger.warning("Telegram BadRequest error: %s", context.error)
-        else:
-            logger.error("Unexpected error: %s", context.error)
+        """Enhanced error handler to prevent crashes."""
+        try:
+            if isinstance(context.error, telegram.error.TimedOut):
+                logger.warning("Telegram timeout error occurred")
+            elif isinstance(context.error, telegram.error.BadRequest):
+                logger.warning("Telegram BadRequest error: %s", context.error)
+            elif isinstance(context.error, telegram.error.NetworkError):
+                logger.error("Network error: %s", context.error)
+            elif isinstance(context.error, MemoryError):
+                logger.critical("Memory error! Attempting to free resources...")
+                gc.collect()
+                # Try to clear global models if memory is low
+                global _global_jobbert_model, _global_adaptive_matcher
+                if _global_jobbert_model:
+                    _global_jobbert_model = None
+                if _global_adaptive_matcher:
+                    _global_adaptive_matcher = None
+                gc.collect()
+            else:
+                logger.error("Unexpected error: %s", context.error, exc_info=True)
+        except Exception as e:
+            logger.error(f"Error in error handler: {e}")
 
     dispatcher.add_error_handler(error_handler)
 
@@ -4218,12 +4323,23 @@ def main():
     dispatcher.add_handler(conv_handler)
     logger.info("Bot started polling...")
     try:
-        updater.start_polling()
+        updater.start_polling(timeout=30, read_latency=2)
+        logger.info("✅ Bot is now running! Press Ctrl+C to stop.")
         updater.idle()
-    except (KeyboardInterrupt, SystemExit):
+    except Exception as e:
+        logger.error(f"Bot polling failed: {e}")
+    finally:
         logger.info("Shutting down bot...")
-        scheduler.shutdown()
-        executor.shutdown(wait=True)
+        try:
+            scheduler.shutdown(wait=False)
+            executor.shutdown(wait=False)
+            # Clear global models to free memory
+            global _global_jobbert_model, _global_adaptive_matcher
+            _global_jobbert_model = None
+            _global_adaptive_matcher = None
+            gc.collect()
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
         logger.info("Bot shutdown complete.")
 
 
