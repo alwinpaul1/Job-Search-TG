@@ -11,4 +11,14 @@ __pycache__/
 .DS_Store
 
 # IDE - VSCode
-.vscode/ 
+.vscode/
+
+# Database files
+*.db
+job_alerts.db
+
+# Documentation files
+CLAUDE.md
+
+# Backup/alternative bot files
+bot1.py 

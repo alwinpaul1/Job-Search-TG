@@ -66,8 +66,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global thread pool for concurrent operations
-executor = ThreadPoolExecutor(max_workers=10)
+# Global thread pool for concurrent operations with proper cleanup
+executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="JobQuest")
 
 # Global lock for database operations
 db_lock = threading.Lock()
@@ -420,6 +420,8 @@ def get_db_connection():
                 # Enable WAL mode for better concurrency
                 conn.execute("PRAGMA journal_mode=WAL;")
                 conn.execute("PRAGMA synchronous=NORMAL;")
+                # Set connection timeout to prevent hanging
+                conn.execute("PRAGMA busy_timeout=5000;")  # 5 second busy timeout
                 return conn
         except sqlite3.OperationalError as e:
             if "database is locked" in str(e).lower() and attempt < max_retries - 1:
@@ -433,6 +435,23 @@ def get_db_connection():
         except Exception as e:
             logger.error(f"Unexpected database error: {e}")
             raise
+
+
+def safe_db_operation(operation_func, *args, **kwargs):
+    """Safely execute database operations with automatic connection cleanup"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        return operation_func(conn, *args, **kwargs)
+    except Exception as e:
+        logger.error(f"Database operation failed: {e}")
+        raise
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception as e:
+                logger.warning(f"Failed to close database connection: {e}")
 
 
 # --- Data Persistence Helper ---
@@ -492,7 +511,41 @@ def safe_progress_update(progress_msg, text: str, parse_mode=None):
 
 def run_concurrent_operation(func, *args, **kwargs):
     """Run an operation in a separate thread to avoid blocking other users."""
-    return executor.submit(func, *args, **kwargs)
+    try:
+        # Check thread pool health before submitting
+        if executor._shutdown:
+            logger.warning("Thread pool is shutdown, cannot submit new tasks")
+            return None
+            
+        future = executor.submit(func, *args, **kwargs)
+        return future
+    except Exception as e:
+        logger.error(f"Failed to submit concurrent operation: {e}")
+        return None
+
+
+def cleanup_stuck_operations():
+    """Clean up stuck user operations and threads"""
+    import time
+    current_time = time.time()
+    stuck_operations = []
+    
+    with user_operations_lock:
+        for user_id, operations in list(user_operations.items()):
+            for operation_type, start_time in list(operations.items()):
+                # If operation has been running for more than 10 minutes, consider it stuck
+                if current_time - start_time > 600:  # 10 minutes
+                    stuck_operations.append((user_id, operation_type))
+                    logger.warning(f"🚨 Stuck operation detected: user {user_id}, operation {operation_type}")
+    
+    # Clean up stuck operations
+    for user_id, operation_type in stuck_operations:
+        unregister_user_operation(user_id, operation_type)
+        logger.info(f"🧹 Cleaned up stuck operation: user {user_id}, operation {operation_type}")
+    
+    if stuck_operations:
+        logger.info(f"🧹 Cleaned up {len(stuck_operations)} stuck operations")
+        force_memory_cleanup()
 
 
 # --- UI Generation Functions ---
@@ -1461,49 +1514,142 @@ class UltraPureDynamicClassifier:
 _global_jobbert_model = None
 _model_load_attempted = False
 _global_adaptive_matcher = None
+_model_last_used = None
+_model_usage_count = 0
+
+# Memory management constants
+MAX_MEMORY_MB = 1500  # Maximum memory before cleanup
+MODEL_IDLE_TIMEOUT = 1800  # 30 minutes of inactivity before unloading
+MAX_MODEL_USES = 50  # Unload model after this many uses to prevent memory fragmentation
+
+
+def get_memory_usage():
+    """Get current memory usage in MB"""
+    try:
+        import psutil
+        import os
+        process = psutil.Process(os.getpid())
+        return process.memory_info().rss / 1024 / 1024
+    except Exception:
+        return 0
+
+
+def force_memory_cleanup():
+    """Aggressive memory cleanup"""
+    import gc
+    import torch
+    
+    # Clear GPU cache if available
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.info("🧹 Cleared GPU cache")
+    except Exception:
+        pass
+    
+    # Force garbage collection multiple times
+    for _ in range(3):
+        gc.collect()
+    
+    logger.info(f"🧹 Memory cleanup completed. Current usage: {get_memory_usage():.1f} MB")
+
+
+def unload_jobbert_model():
+    """Unload the JobBERT model to free memory"""
+    global _global_jobbert_model, _model_load_attempted, _model_last_used, _model_usage_count
+    
+    if _global_jobbert_model is not None:
+        logger.info("🗑️ Unloading JobBERT model to free memory...")
+        del _global_jobbert_model
+        _global_jobbert_model = None
+        _model_load_attempted = False
+        _model_last_used = None
+        _model_usage_count = 0
+        
+        force_memory_cleanup()
+        logger.info(f"✅ JobBERT model unloaded. Memory usage: {get_memory_usage():.1f} MB")
+
+
+def should_unload_model():
+    """Check if model should be unloaded based on memory and usage patterns"""
+    global _model_last_used, _model_usage_count
+    
+    current_memory = get_memory_usage()
+    
+    # Unload if memory usage is too high
+    if current_memory > MAX_MEMORY_MB:
+        logger.warning(f"🚨 High memory usage: {current_memory:.1f} MB > {MAX_MEMORY_MB} MB")
+        return True
+    
+    # Unload if model has been used too many times (prevent fragmentation)
+    if _model_usage_count > MAX_MODEL_USES:
+        logger.info(f"🔄 Model used {_model_usage_count} times, unloading to prevent fragmentation")
+        return True
+    
+    # Unload if model has been idle too long
+    if _model_last_used:
+        import time
+        idle_time = time.time() - _model_last_used
+        if idle_time > MODEL_IDLE_TIMEOUT:
+            logger.info(f"💤 Model idle for {idle_time/60:.1f} minutes, unloading")
+            return True
+    
+    return False
 
 
 def get_jobbert_model():
-    """Get or load the JobBERT model (singleton pattern with memory protection)"""
-    global _global_jobbert_model, _model_load_attempted
-    import gc
-    import psutil
-    import os
+    """Get or load the JobBERT model with intelligent memory management"""
+    global _global_jobbert_model, _model_load_attempted, _model_last_used, _model_usage_count
+    import time
+    
+    # Check if we should unload the model first
+    if _global_jobbert_model is not None and should_unload_model():
+        unload_jobbert_model()
+    
+    # Load model if not available
+    if _global_jobbert_model is None:
+        _model_load_attempted = False  # Reset to allow reloading
+    
+    if not _model_load_attempted:
+        _model_load_attempted = True
 
-    if _model_load_attempted:
-        return _global_jobbert_model
-
-    _model_load_attempted = True
-
-    if not SENTENCE_TRANSFORMERS_AVAILABLE:
-        logger.warning("❌ Sentence transformers not available")
-        return None
-
-    try:
-        # Check available memory before loading model
-        process = psutil.Process(os.getpid())
-        memory_mb = process.memory_info().rss / 1024 / 1024
-        logger.info(f"Current memory usage: {memory_mb:.1f} MB")
-        
-        if memory_mb > 1000:  # If using more than 1GB, try to free memory
-            gc.collect()
-            logger.warning("High memory usage detected, running garbage collection")
-
-        logger.info("🤖 Loading JobBERT-v2 model (this may take a moment)...")
-        _global_jobbert_model = SentenceTransformer("TechWolf/JobBERT-v2")
-        logger.info("✅ JobBERT-v2 loaded successfully")
-        return _global_jobbert_model
-    except Exception as e:
-        logger.error(f"❌ Failed to load JobBERT-v2: {e}")
-        try:
-            logger.info("🔄 Fallback: Loading all-MiniLM-L6-v2...")
-            _global_jobbert_model = SentenceTransformer("all-MiniLM-L6-v2")
-            logger.info("✅ Fallback model loaded successfully")
-            return _global_jobbert_model
-        except Exception as e2:
-            logger.error(f"❌ Failed to load fallback model: {e2}")
-            _global_jobbert_model = None
+        if not SENTENCE_TRANSFORMERS_AVAILABLE:
+            logger.warning("❌ Sentence transformers not available")
             return None
+
+        try:
+            # Pre-cleanup before loading
+            current_memory = get_memory_usage()
+            logger.info(f"💾 Current memory usage before loading: {current_memory:.1f} MB")
+            
+            if current_memory > 800:  # Cleanup if using more than 800MB
+                force_memory_cleanup()
+
+            logger.info("🤖 Loading JobBERT-v2 model (this may take a moment)...")
+            _global_jobbert_model = SentenceTransformer("TechWolf/JobBERT-v2")
+            logger.info("✅ JobBERT-v2 loaded successfully")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to load JobBERT-v2: {e}")
+            try:
+                logger.info("🔄 Fallback: Loading all-MiniLM-L6-v2...")
+                _global_jobbert_model = SentenceTransformer("all-MiniLM-L6-v2")
+                logger.info("✅ Fallback model loaded successfully")
+            except Exception as e2:
+                logger.error(f"❌ Failed to load fallback model: {e2}")
+                _global_jobbert_model = None
+                return None
+    
+    # Update usage tracking
+    if _global_jobbert_model is not None:
+        _model_last_used = time.time()
+        _model_usage_count += 1
+        
+        # Log memory usage periodically
+        if _model_usage_count % 10 == 0:
+            logger.info(f"📊 Model usage: {_model_usage_count} times, Memory: {get_memory_usage():.1f} MB")
+    
+    return _global_jobbert_model
 
 
 def get_adaptive_matcher():
@@ -1520,29 +1666,45 @@ def get_adaptive_matcher():
 
 class AdaptiveJobBERTMatcher:
     def __init__(self):
-        self.model = get_jobbert_model()  # Use singleton
         self.dynamic_classifier = UltraPureDynamicClassifier()
 
     def calculate_adaptive_relevance(self, jobs, query):
-        """Use JobBERT's natural understanding to filter jobs adaptively"""
-        if not self.model:
+        """Use JobBERT's natural understanding to filter jobs adaptively with memory management"""
+        # Get fresh model instance (handles memory management internally)
+        model = get_jobbert_model()
+        
+        if not model:
             logger.info("🔄 JobBERT not available, using fallback filtering")
             return self._fallback_basic_filter(jobs, query)
 
+        job_embeddings = None
+        query_embedding = None
+        similarities = None
+        
         try:
-            logger.debug(f"🤖 Processing {len(jobs)} jobs with JobBERT...")
+            memory_before = get_memory_usage()
+            logger.debug(f"🤖 Processing {len(jobs)} jobs with JobBERT... Memory: {memory_before:.1f} MB")
 
             # Step 1: Encode everything with JobBERT
             job_texts = [f"{job['Title']} {job['Company']}" for job in jobs]
 
-            # Batch processing with error handling
+            # Batch processing with error handling and memory monitoring
             try:
-                job_embeddings = self.model.encode(
+                # Monitor memory during encoding
+                if memory_before > MAX_MEMORY_MB * 0.8:  # 80% of max memory
+                    logger.warning(f"⚠️ High memory before encoding: {memory_before:.1f} MB")
+                    force_memory_cleanup()
+                
+                job_embeddings = model.encode(
                     job_texts, show_progress_bar=False, convert_to_tensor=False
                 )
-                query_embedding = self.model.encode(
+                query_embedding = model.encode(
                     [query], show_progress_bar=False, convert_to_tensor=False
                 )
+                
+                memory_after_encoding = get_memory_usage()
+                logger.debug(f"📊 Memory after encoding: {memory_after_encoding:.1f} MB (+{memory_after_encoding - memory_before:.1f} MB)")
+                
             except Exception as e:
                 logger.warning(f"❌ JobBERT encoding failed: {e}")
                 return self._fallback_basic_filter(jobs, query)
@@ -1592,15 +1754,42 @@ class AdaptiveJobBERTMatcher:
                 f"✅ JobBERT processing complete: "
                 f"{len(relevant_jobs)} relevant jobs"
             )
-            return sorted(
+            
+            result = sorted(
                 relevant_jobs, key=lambda x: x.get("final_score", 0),
                 reverse=True
             )
+            
+            return result
 
         except Exception as e:
             logger.error(f"❌ JobBERT processing failed completely: {e}")
             logger.info("🔄 Falling back to basic keyword filtering")
             return self._fallback_basic_filter(jobs, query)
+        
+        finally:
+            # Critical: Clean up embeddings to prevent memory leaks
+            try:
+                if job_embeddings is not None:
+                    del job_embeddings
+                if query_embedding is not None:
+                    del query_embedding
+                if similarities is not None:
+                    del similarities
+                
+                # Force cleanup after processing
+                import gc
+                gc.collect()
+                
+                memory_final = get_memory_usage()
+                logger.debug(f"🧹 Memory after cleanup: {memory_final:.1f} MB")
+                
+                # Check if we should unload the model after this operation
+                if should_unload_model():
+                    unload_jobbert_model()
+                    
+            except Exception as cleanup_error:
+                logger.warning(f"⚠️ Cleanup error (non-critical): {cleanup_error}")
 
     def _calculate_adaptive_threshold(self, query, similarities):
         """Improved adaptive threshold calculation"""
@@ -4056,10 +4245,38 @@ def main():
 
     def signal_handler(signum, frame):
         logger.info(f"Received signal {signum}, shutting down gracefully...")
+        
+        # Shutdown scheduler
         if 'scheduler' in locals():
-            scheduler.shutdown(wait=False)
+            try:
+                scheduler.shutdown(wait=False)
+                logger.info("✅ Scheduler shutdown complete")
+            except Exception as e:
+                logger.error(f"Error shutting down scheduler: {e}")
+        
+        # Shutdown thread pool
         if 'executor' in globals():
-            executor.shutdown(wait=False)
+            try:
+                executor.shutdown(wait=True, timeout=30)
+                logger.info("✅ Thread pool shutdown complete")
+            except Exception as e:
+                logger.error(f"Error shutting down thread pool: {e}")
+        
+        # Cleanup models
+        try:
+            unload_jobbert_model()
+            logger.info("✅ Model cleanup complete")
+        except Exception as e:
+            logger.error(f"Error during model cleanup: {e}")
+        
+        # Final memory cleanup
+        try:
+            force_memory_cleanup()
+            logger.info("✅ Final memory cleanup complete")
+        except Exception as e:
+            logger.error(f"Error during final cleanup: {e}")
+        
+        logger.info("🏁 Graceful shutdown complete")
         sys.exit(0)
 
     # Register signal handlers for graceful shutdown
@@ -4093,13 +4310,85 @@ def main():
 
     scheduler = BackgroundScheduler(timezone="UTC")
 
+    def memory_aware_check_alerts(bot_instance):
+        """Memory-aware alert checking with adaptive intervals"""
+        try:
+            current_memory = get_memory_usage()
+            logger.info(f"🔍 Starting alert check cycle. Memory: {current_memory:.1f} MB")
+            
+            # Skip if memory is too high
+            if current_memory > MAX_MEMORY_MB:
+                logger.warning(f"⚠️ Skipping alert check due to high memory: {current_memory:.1f} MB")
+                force_memory_cleanup()
+                return
+            
+            # Run the actual alert check
+            check_all_alerts(bot_instance)
+            
+            # Cleanup after alert check
+            force_memory_cleanup()
+            
+            # Unload model if needed
+            if should_unload_model():
+                unload_jobbert_model()
+                
+        except Exception as e:
+            logger.error(f"Memory-aware alert check failed: {e}")
+            force_memory_cleanup()
+
+    def periodic_memory_cleanup():
+        """Periodic memory cleanup job"""
+        try:
+            current_memory = get_memory_usage()
+            logger.info(f"🧹 Periodic cleanup. Memory: {current_memory:.1f} MB")
+            
+            if current_memory > MAX_MEMORY_MB * 0.7:  # 70% of max
+                logger.info("Running periodic memory cleanup...")
+                force_memory_cleanup()
+                
+                # Unload model if memory is still high
+                if get_memory_usage() > MAX_MEMORY_MB * 0.8:
+                    unload_jobbert_model()
+                    
+        except Exception as e:
+            logger.error(f"Periodic cleanup failed: {e}")
+
     try:
         bot_instance = Bot(token=token)
-        # Reduce alert check frequency to save resources
-        scheduler.add_job(check_all_alerts, "interval", minutes=60,
-                          args=[bot_instance], max_instances=1)
+        
+        # Add memory-aware alert checking (30 minutes for faster job detection)
+        scheduler.add_job(
+            memory_aware_check_alerts, 
+            "interval", 
+            minutes=30,  # Reduced to 30 minutes with memory management
+            args=[bot_instance], 
+            max_instances=1,
+            id="alert_checker"
+        )
+        
+        # Add periodic memory cleanup every 15 minutes
+        scheduler.add_job(
+            periodic_memory_cleanup,
+            "interval",
+            minutes=15,
+            max_instances=1,
+            id="memory_cleanup"
+        )
+        
+        # Add stuck operation cleanup every 5 minutes
+        scheduler.add_job(
+            cleanup_stuck_operations,
+            "interval",
+            minutes=5,
+            max_instances=1,
+            id="operation_cleanup"
+        )
+        
         scheduler.start()
-        logger.info("Background scheduler started (checks every 60 minutes)")
+        logger.info("🚀 Background scheduler started:")
+        logger.info("   - Alert checks every 30 minutes (memory-aware)")
+        logger.info("   - Memory cleanup every 15 minutes")
+        
     except Exception as e:
         logger.error(f"Failed to start scheduler: {e}")
         return
