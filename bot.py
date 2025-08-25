@@ -66,12 +66,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Alert monitoring logger
+alert_logger = logging.getLogger("alert_monitor")
+alert_handler = logging.FileHandler("alert_monitor.log")
+alert_handler.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
+alert_logger.addHandler(alert_handler)
+alert_logger.setLevel(logging.INFO)
+
 # Global thread pool for concurrent operations with proper cleanup
-executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="JobQuest")
+executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="JobQuest")
 
 # Global lock for database operations
 db_lock = threading.Lock()
-ai_lock = threading.Lock()  # Global lock for AI operations
+# Per-operation AI locks to reduce contention
+search_ai_lock = threading.Lock()  # For user searches
+alert_ai_lock = threading.Lock()   # For background alert processing
 
 # User-specific operation tracking
 user_operations = {}
@@ -1518,7 +1527,7 @@ _model_last_used = None
 _model_usage_count = 0
 
 # Memory management constants
-MAX_MEMORY_MB = 1500  # Maximum memory before cleanup
+MAX_MEMORY_MB = 2500  # Maximum memory before cleanup
 MODEL_IDLE_TIMEOUT = 1800  # 30 minutes of inactivity before unloading
 MAX_MODEL_USES = 200  # Unload model after this many uses to prevent memory fragmentation
 
@@ -1581,8 +1590,14 @@ def should_unload_model():
         logger.warning(f"🚨 High memory usage: {current_memory:.1f} MB > {MAX_MEMORY_MB} MB")
         return True
     
-    # Unload if model has been used too many times (prevent fragmentation)
-    if _model_usage_count > MAX_MODEL_USES:
+    # Dynamic model usage limit based on available memory
+    memory_usage_ratio = current_memory / MAX_MEMORY_MB
+    if memory_usage_ratio > 0.8:  # Over 80% memory usage
+        dynamic_max_uses = max(50, int(MAX_MODEL_USES * (1 - memory_usage_ratio)))
+        if _model_usage_count >= dynamic_max_uses:
+            logger.info(f"🔄 Dynamic unload: {_model_usage_count} uses at {memory_usage_ratio:.1%} memory")
+            return True
+    elif _model_usage_count > MAX_MODEL_USES:
         logger.info(f"🔄 Model used {_model_usage_count} times, unloading to prevent fragmentation")
         return True
     
@@ -2732,8 +2747,8 @@ def run_scrape_threaded(
 
         logger.info(f"User {user_id} is attempting to start a live search.")
 
-        # Try to acquire the lock without blocking
-        if not ai_lock.acquire(blocking=False):
+        # Try to acquire the search AI lock without blocking
+        if not search_ai_lock.acquire(blocking=False):
             # The lock is busy. Notify the user and then wait.
             logger.info(f"AI lock is busy. Notifying user {user_id} that they are queued.")
             safe_progress_update(
@@ -2743,8 +2758,8 @@ def run_scrape_threaded(
                 ParseMode.MARKDOWN
             )
             # Now, block and wait until the lock is released.
-            ai_lock.acquire()
-            logger.info(f"AI lock acquired for user {user_id} after waiting.")
+            search_ai_lock.acquire()
+            logger.info(f"Search AI lock acquired for user {user_id} after waiting.")
 
         # At this point, we are GUARANTEED to have the lock.
         try:
@@ -2791,8 +2806,8 @@ def run_scrape_threaded(
 
         finally:
             # CRUCIAL: Release the lock so other processes can run.
-            logger.info(f"Releasing AI lock for user {user_id}'s search.")
-            ai_lock.release()
+            logger.info(f"Releasing search AI lock for user {user_id}'s search.")
+            search_ai_lock.release()
 
     except Exception as e:
         logger.error(f"Search failed for user {user_id}: {e}", exc_info=True)
@@ -4024,6 +4039,9 @@ def check_single_alert(alert, bot: Bot):
     """Check a single alert with enhanced error handling and memory management."""
     conn = None
     import gc
+    start_time = time.time()
+    start_memory = get_memory_usage()
+    
     try:
         logger.info(
             "Checking alert ID %s for chat ID %s...",
@@ -4048,22 +4066,22 @@ def check_single_alert(alert, bot: Bot):
 
         scheduler_user_id = f"scheduler_{alert['id']}"
         
-        # Acquire the AI lock with timeout to prevent deadlocks
-        logger.info(f"Background alert {alert['id']} waiting for AI lock...")
-        lock_acquired = ai_lock.acquire(timeout=300)  # 5 minute timeout
+        # Acquire the alert AI lock with timeout to prevent deadlocks
+        logger.info(f"Background alert {alert['id']} waiting for alert AI lock...")
+        lock_acquired = alert_ai_lock.acquire(timeout=300)  # 5 minute timeout
         if not lock_acquired:
-            logger.error(f"Failed to acquire AI lock for alert {alert['id']} after 5 minutes")
+            logger.error(f"Failed to acquire alert AI lock for alert {alert['id']} after 5 minutes")
             return
             
         try:
-            logger.info(f"AI lock acquired for background alert {alert['id']}.")
+            logger.info(f"Alert AI lock acquired for background alert {alert['id']}.")
             found_jobs = scrape_linkedin_with_adaptive_jobbert(
                 alert["keywords"], alert["location"], filter_dict,
                 progress_msg=None, user_id=scheduler_user_id,
             )
         finally:
-            ai_lock.release()
-            logger.info(f"AI lock released for background alert {alert['id']}.")
+            alert_ai_lock.release()
+            logger.info(f"Alert AI lock released for background alert {alert['id']}.")
             gc.collect()  # Clean up memory after processing
 
         conn = get_db_connection()
@@ -4211,6 +4229,19 @@ def check_single_alert(alert, bot: Bot):
             except Exception as e:
                 logger.error(f"Error closing database connection: {e}")
         gc.collect()  # Always clean up memory after alert check
+        
+        # Log alert completion with key metrics
+        end_time = time.time()
+        end_memory = get_memory_usage()
+        processing_time = end_time - start_time
+        memory_delta = end_memory - start_memory
+        
+        alert_logger.info(
+            f"Alert {alert['id']} | "
+            f"Time: {processing_time:.1f}s | "
+            f"Memory: {end_memory:.1f}MB ({memory_delta:+.1f}) | "
+            f"Status: {'SUCCESS' if 'found_jobs' in locals() else 'ERROR'}"
+        )
 
 
 # --- New Timezone Functions ---
