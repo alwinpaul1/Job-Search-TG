@@ -1520,7 +1520,7 @@ _model_usage_count = 0
 # Memory management constants
 MAX_MEMORY_MB = 1500  # Maximum memory before cleanup
 MODEL_IDLE_TIMEOUT = 1800  # 30 minutes of inactivity before unloading
-MAX_MODEL_USES = 50  # Unload model after this many uses to prevent memory fragmentation
+MAX_MODEL_USES = 200  # Unload model after this many uses to prevent memory fragmentation
 
 
 def get_memory_usage():
@@ -1667,6 +1667,33 @@ def get_adaptive_matcher():
 class AdaptiveJobBERTMatcher:
     def __init__(self):
         self.dynamic_classifier = UltraPureDynamicClassifier()
+        # Initialize the model for domain coherence calculations
+        self.model = None
+        self._load_model()
+
+    def _load_model(self):
+        """Load JobBERT model with proper error handling"""
+        try:
+            self.model = get_jobbert_model()
+            if self.model:
+                logger.debug("✅ AdaptiveJobBERTMatcher: Model loaded successfully")
+            else:
+                logger.warning("⚠️ AdaptiveJobBERTMatcher: Model not available, domain coherence will use fallback")
+        except Exception as e:
+            logger.warning(f"❌ AdaptiveJobBERTMatcher: Failed to load model: {e}")
+            self.model = None
+
+    def _ensure_model_loaded(self):
+        """Ensure model is loaded and available"""
+        if self.model is None:
+            logger.debug("🔄 AdaptiveJobBERTMatcher: Attempting to reload model")
+            self._load_model()
+        # Also check if the global model changed (memory management might have reloaded it)
+        global _global_jobbert_model
+        if self.model is not _global_jobbert_model and _global_jobbert_model is not None:
+            logger.debug("🔄 AdaptiveJobBERTMatcher: Updating model reference to global instance")
+            self.model = _global_jobbert_model
+        return self.model is not None
 
     def calculate_adaptive_relevance(self, jobs, query):
         """Use JobBERT's natural understanding to filter jobs adaptively with memory management"""
@@ -2223,7 +2250,7 @@ class AdaptiveJobBERTMatcher:
             combined_domain_score + (partial_domain_score * 0.05)
         )
 
-        if self.model:
+        if self._ensure_model_loaded():
             try:
                 domain_query = " ".join(all_domain_terms)
                 domain_embedding = self.model.encode([domain_query])
@@ -2269,10 +2296,14 @@ class AdaptiveJobBERTMatcher:
                 return final_score
 
             except Exception as e:
-                logger.warning(f"JobBERT semantic matching failed: {e}")
-                return final_combined_score if final_combined_score >= 0.4 \
-                    else 0.1
-
+                logger.warning(f"❌ JobBERT semantic matching failed in domain coherence: {e}")
+                # Clear the model to force reload on next attempt
+                self.model = None
+                return final_combined_score if final_combined_score >= 0.4 else 0.1
+        
+        # Model not available, using lexical matching only
+        logger.debug(f"🔄 Model not available for domain coherence, using lexical score: {final_combined_score:.3f}")
+        
         if final_combined_score >= 0.4:
             return final_combined_score
         logger.debug(
