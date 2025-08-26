@@ -712,11 +712,7 @@ def make_preferences_menu(
         date_posted = list(prefs["date_posted"].keys())[0]
     else:
         date_posted = "Any"
-    workplace = ""
-    if prefs["workplace"]:
-        workplace = list(prefs["workplace"].keys())[0]
-    else:
-        workplace = "Any"
+    workplace = ", ".join(prefs["workplace"].keys()) or "Any"
 
     # Get user timezone
     conn = get_db_connection()
@@ -789,14 +785,16 @@ def make_workplace_menu(
     context: CallbackContext
 ) -> (str, InlineKeyboardMarkup):
     prefs = get_user_prefs(context)
-    selected_value = None
-    if prefs["workplace"]:
-        selected_value = list(prefs["workplace"].values())[0]
+    selected_options = prefs["workplace"]
 
-    text = "🏢 Choose Workplace Type"
+    text = ("🏢 Choose Your Workplace Types\n\n"
+           "▫️ Click to select/deselect options\n"
+           "▫️ Multiple selections use AND logic\n"
+           "▫️ Click 'Done' when finished.")
+    
     keyboard = []
     for option_text, option_id in WORKPLACE_TYPES.items():
-        is_selected = selected_value == option_id
+        is_selected = option_id in selected_options.values()
         display_text = f"✅ {option_text}" if is_selected else option_text
         keyboard.append([
             InlineKeyboardButton(
@@ -804,9 +802,6 @@ def make_workplace_menu(
             )
         ])
 
-    keyboard.append([
-        InlineKeyboardButton("Clear Filter", callback_data="wt_clear_None")
-    ])
     keyboard.append([InlineKeyboardButton("✔️ Done", callback_data="wt_done")])
     return text, InlineKeyboardMarkup(keyboard)
 
@@ -983,10 +978,18 @@ def workplace_selected(update: Update, context: CallbackContext):
 
     _, option_id, option_text = update.callback_query.data.split("_", 2)
 
-    if option_id == "clear" or option_id in prefs["workplace"].values():
-        prefs["workplace"] = {}
+    selected_dict = prefs["workplace"]
+
+    if option_id in selected_dict.values():
+        # Deselect: find key by value and delete
+        key_to_del = next(
+            (k for k, v in selected_dict.items() if v == option_id), None
+        )
+        if key_to_del:
+            del selected_dict[key_to_del]
     else:
-        prefs["workplace"] = {option_text: option_id}
+        # Select
+        selected_dict[option_text] = option_id
 
     # Re-render the menu to show the change
     text, keyboard = make_workplace_menu(context)
@@ -2957,7 +2960,7 @@ def run_scrape_threaded(
             "f_E": ",".join(prefs["experience"].values()),
             "f_JT": ",".join(prefs["job_types"].values()),
             "f_TPR": list(prefs["date_posted"].values())[0] if prefs["date_posted"] else None,
-            "f_WT": list(prefs["workplace"].values())[0] if prefs["workplace"] else None,
+            "f_WT": ",".join(prefs["workplace"].values()) if prefs["workplace"] else None,
         }
 
         logger.info(f"User {user_id} is attempting to start a live search.")
@@ -3198,7 +3201,7 @@ def setup_alert_threaded(query, context, keywords, location, prefs):
 
         workplace_value = None
         if prefs["workplace"]:
-            workplace_value = list(prefs["workplace"].values())[0]
+            workplace_value = ",".join(prefs["workplace"].values())
 
         filter_dict = {
             "f_E": ",".join(prefs["experience"].values()),
@@ -3444,14 +3447,16 @@ def show_alert_workplace_menu(update: Update, context: CallbackContext):
     query.answer()
 
     prefs = get_alert_prefs(context)
-    selected_value = None
-    if prefs["workplace"]:
-        selected_value = list(prefs["workplace"].values())[0]
+    selected_options = prefs["workplace"]
 
-    text = "🏢 Choose Workplace Type for This Alert"
+    text = ("🏢 Choose Workplace Types for This Alert\n\n"
+           "▫️ Click to select/deselect options\n"
+           "▫️ Multiple selections use AND logic\n"
+           "▫️ Click 'Done' when finished.")
+    
     keyboard = []
     for option_text, option_id in WORKPLACE_TYPES.items():
-        is_selected = selected_value == option_id
+        is_selected = option_id in selected_options.values()
         display_text = f"✅ {option_text}" if is_selected else option_text
         keyboard.append([
             InlineKeyboardButton(
@@ -3460,11 +3465,6 @@ def show_alert_workplace_menu(update: Update, context: CallbackContext):
             )
         ])
 
-    keyboard.append([
-        InlineKeyboardButton(
-            "Clear Filter", callback_data="alert_wt_clear_None"
-        )
-    ])
     keyboard.append([
         InlineKeyboardButton("✔️ Done", callback_data="alert_wt_done")
     ])
@@ -3479,10 +3479,18 @@ def alert_workplace_selected(update: Update, context: CallbackContext):
 
     _, _, option_id, option_text = update.callback_query.data.split("_", 3)
 
-    if option_id == "clear" or option_id in prefs["workplace"].values():
-        prefs["workplace"] = {}
+    selected_dict = prefs["workplace"]
+
+    if option_id in selected_dict.values():
+        # Deselect: find key by value and delete
+        key_to_del = next(
+            (k for k, v in selected_dict.items() if v == option_id), None
+        )
+        if key_to_del:
+            del selected_dict[key_to_del]
     else:
-        prefs["workplace"] = {option_text: option_id}
+        # Select
+        selected_dict[option_text] = option_id
 
     return show_alert_workplace_menu(update, context)
 
@@ -3960,7 +3968,7 @@ def update_alert_baseline_threaded(
 
         workplace_value = None
         if prefs.get("workplace"):
-            workplace_value = list(prefs["workplace"].values())[0]
+            workplace_value = ",".join(prefs["workplace"].values())
 
         filter_dict = {
             "f_E": ",".join(prefs.get("experience", {}).values()),
@@ -4115,14 +4123,16 @@ def show_edit_alert_workplace_menu(update: Update, context: CallbackContext):
     query.answer()
 
     prefs = get_alert_prefs(context)
-    selected_value = None
-    if prefs["workplace"]:
-        selected_value = list(prefs["workplace"].values())[0]
+    selected_options = prefs["workplace"]
 
-    text = "🏢 Choose Workplace Type for This Alert"
+    text = ("🏢 Choose Workplace Types for This Alert\n\n"
+           "▫️ Click to select/deselect options\n"
+           "▫️ Multiple selections use AND logic\n"
+           "▫️ Click 'Done' when finished.")
+    
     keyboard = []
     for option_text, option_id in WORKPLACE_TYPES.items():
-        is_selected = selected_value == option_id
+        is_selected = option_id in selected_options.values()
         display_text = f"✅ {option_text}" if is_selected else option_text
         keyboard.append([
             InlineKeyboardButton(
@@ -4131,11 +4141,6 @@ def show_edit_alert_workplace_menu(update: Update, context: CallbackContext):
             )
         ])
 
-    keyboard.append([
-        InlineKeyboardButton(
-            "Clear Filter", callback_data="edit_alert_wt_clear_None"
-        )
-    ])
     keyboard.append([
         InlineKeyboardButton("✔️ Done", callback_data="edit_alert_wt_done")
     ])
@@ -4152,10 +4157,18 @@ def edit_alert_workplace_selected(update: Update, context: CallbackContext):
     option_id = data_parts[3]
     option_text = data_parts[4]
 
-    if option_id == "clear" or option_id in prefs["workplace"].values():
-        prefs["workplace"] = {}
+    selected_dict = prefs["workplace"]
+
+    if option_id in selected_dict.values():
+        # Deselect: find key by value and delete
+        key_to_del = next(
+            (k for k, v in selected_dict.items() if v == option_id), None
+        )
+        if key_to_del:
+            del selected_dict[key_to_del]
     else:
-        prefs["workplace"] = {option_text: option_id}
+        # Select
+        selected_dict[option_text] = option_id
 
     return show_edit_alert_workplace_menu(update, context)
 
@@ -4270,7 +4283,7 @@ def check_single_alert(alert, bot: Bot):
 
         workplace_value = None
         if filters["workplace"]:
-            workplace_value = next(iter(filters["workplace"].values()))
+            workplace_value = ",".join(filters["workplace"].values())
 
         filter_dict = {
             "f_E": ",".join(filters["experience"].values()),
