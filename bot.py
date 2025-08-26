@@ -1784,18 +1784,18 @@ def unload_jobbert_model():
 
 
 def should_unload_model():
-    """Check if model should be unloaded based on memory and usage patterns"""
+    """Check if model should be unloaded based on memory and usage patterns (optimized for efficiency)"""
     global _model_last_used, _model_usage_count
     
     current_memory = get_memory_usage()
+    memory_usage_ratio = current_memory / MAX_MEMORY_MB
     
-    # Unload if memory usage is too high
+    # 1. Critical memory situation - immediate unload required
     if current_memory > MAX_MEMORY_MB:
-        logger.warning(f"🚨 High memory usage: {current_memory:.1f} MB > {MAX_MEMORY_MB} MB")
+        logger.warning(f"🚨 Critical memory usage: {current_memory:.1f} MB > {MAX_MEMORY_MB} MB")
         return True
     
-    # Dynamic model usage limit based on available memory
-    memory_usage_ratio = current_memory / MAX_MEMORY_MB
+    # 2. Usage-based unload to prevent memory fragmentation
     if memory_usage_ratio > 0.8:  # Over 80% memory usage
         dynamic_max_uses = max(50, int(MAX_MODEL_USES * (1 - memory_usage_ratio)))
         if _model_usage_count >= dynamic_max_uses:
@@ -1805,13 +1805,22 @@ def should_unload_model():
         logger.info(f"🔄 Model used {_model_usage_count} times, unloading to prevent fragmentation")
         return True
     
-    # Unload if model has been idle too long
+    # 3. Idle timeout - ONLY unload if there's memory pressure (efficient resource management)
     if _model_last_used:
         import time
         idle_time = time.time() - _model_last_used
         if idle_time > MODEL_IDLE_TIMEOUT:
-            logger.info(f"💤 Model idle for {idle_time/60:.1f} minutes, unloading")
-            return True
+            # Smart logic: Only unload idle model if we need the memory
+            memory_pressure_threshold = 0.7  # 70% memory usage indicates pressure
+            is_memory_pressure = memory_usage_ratio > memory_pressure_threshold
+            
+            if is_memory_pressure:
+                logger.info(f"💤 Model idle for {idle_time/60:.1f} minutes under memory pressure ({memory_usage_ratio:.1%}), unloading")
+                return True
+            else:
+                # Model is idle but memory is healthy - keep it loaded for performance
+                logger.debug(f"⏰ Model idle for {idle_time/60:.1f} minutes but memory healthy ({memory_usage_ratio:.1%}), keeping loaded")
+                return False
     
     return False
 
