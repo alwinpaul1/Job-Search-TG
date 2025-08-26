@@ -136,7 +136,7 @@ class DatabasePool:
                 logger.warning(f"Error returning connection to pool: {e}")
                 try:
                     conn.close()
-                except:
+                except Exception:
                     pass
                 if self.active_connections > 0:
                     self.active_connections -= 1
@@ -567,7 +567,7 @@ def safe_db_operation(operation_func, *args, **kwargs):
             if conn:
                 try:
                     conn.close()  # Don't return corrupted connections to pool
-                except:
+                except Exception:
                     pass
                 conn = None
             if "database is locked" in str(e).lower() and attempt < max_retries - 1:
@@ -582,7 +582,7 @@ def safe_db_operation(operation_func, *args, **kwargs):
             if conn:
                 try:
                     conn.close()  # Don't return corrupted connections to pool
-                except:
+                except Exception:
                     pass
             raise
         finally:
@@ -4529,8 +4529,6 @@ def timezone_received(update: Update, context: CallbackContext):
 
 def main():
     import argparse
-    import sys
-    import signal
     import gc
 
     def signal_handler(signum, frame):
