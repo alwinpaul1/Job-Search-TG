@@ -52,7 +52,7 @@ A powerful Telegram bot for intelligent job searching and automated job alerts u
 3. **Set up environment variables**
    Create a `.env` file in the project root:
    ```env
-   TELEGRAM_TOKEN=your_telegram_bot_token_here
+   TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
    ```
 
 4. **Run the bot**
