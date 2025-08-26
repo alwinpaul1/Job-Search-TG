@@ -42,6 +42,8 @@ except ImportError:
     filters = Filters
 
 import re
+import signal
+import sys
 import unicodedata
 from datetime import datetime, timedelta
 from urllib.parse import quote_plus
@@ -76,15 +78,119 @@ alert_logger.setLevel(logging.INFO)
 # Global thread pool for concurrent operations with proper cleanup
 executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="JobQuest")
 
-# Global lock for database operations
-db_lock = threading.Lock()
-# Per-operation AI locks to reduce contention
+# Enhanced lock system for thread safety
+db_lock = threading.RLock()  # Reentrant lock for nested database operations
 search_ai_lock = threading.Lock()  # For user searches
 alert_ai_lock = threading.Lock()   # For background alert processing
+model_lock = threading.RLock()     # For model loading/unloading operations
+memory_cleanup_lock = threading.Lock()  # For memory cleanup operations
+scheduler_lock = threading.Lock()  # For scheduler operations
+
+# Global state locks
+global_state_lock = threading.RLock()  # For global variable access
+heartbeat_lock = threading.Lock()      # For heartbeat mechanism
 
 # User-specific operation tracking
 user_operations = {}
 user_operations_lock = threading.Lock()
+
+# Global shutdown flag for graceful termination
+shutdown_requested = threading.Event()
+heartbeat_active = threading.Event()
+heartbeat_active.set()  # Start with heartbeat active
+
+# Simple database connection pool
+class DatabasePool:
+    def __init__(self, max_connections=5):
+        self.max_connections = max_connections
+        self.pool = []
+        self.pool_lock = threading.Lock()
+        self.active_connections = 0
+        
+    def get_connection(self):
+        """Get a connection from the pool or create a new one"""
+        with self.pool_lock:
+            if self.pool:
+                return self.pool.pop()
+            elif self.active_connections < self.max_connections:
+                self.active_connections += 1
+                conn = self._create_connection()
+                return conn
+            else:
+                # Pool exhausted, create temporary connection
+                logger.warning("Database pool exhausted, creating temporary connection")
+                return self._create_connection()
+    
+    def return_connection(self, conn):
+        """Return a connection to the pool"""
+        if conn:
+            try:
+                with self.pool_lock:
+                    if len(self.pool) < self.max_connections:
+                        self.pool.append(conn)
+                    else:
+                        conn.close()
+                        if self.active_connections > 0:
+                            self.active_connections -= 1
+            except Exception as e:
+                logger.warning(f"Error returning connection to pool: {e}")
+                try:
+                    conn.close()
+                except:
+                    pass
+                if self.active_connections > 0:
+                    self.active_connections -= 1
+    
+    def _create_connection(self):
+        """Create a new database connection"""
+        conn = sqlite3.connect(
+            "job_alerts.db",
+            check_same_thread=False,
+            timeout=10.0
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
+        return conn
+    
+    def close_all(self):
+        """Close all connections in the pool"""
+        with self.pool_lock:
+            while self.pool:
+                try:
+                    conn = self.pool.pop()
+                    conn.close()
+                except Exception as e:
+                    logger.warning(f"Error closing pooled connection: {e}")
+            self.active_connections = 0
+
+# Global database pool
+db_pool = DatabasePool(max_connections=5)
+
+# Signal handlers for graceful shutdown
+def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully"""
+    signal_names = {signal.SIGTERM: "SIGTERM", signal.SIGINT: "SIGINT"}
+    signal_name = signal_names.get(signum, f"Signal {signum}")
+    logger.info(f"🛑 Received {signal_name}, initiating graceful shutdown...")
+    
+    with global_state_lock:
+        shutdown_requested.set()
+        heartbeat_active.clear()
+    
+    # Give some time for cleanup before forcing exit
+    threading.Timer(30.0, force_exit).start()
+
+def force_exit():
+    """Force exit if graceful shutdown takes too long"""
+    logger.warning("⚠️ Force exit after 30 seconds")
+    os._exit(1)
+
+# Register signal handlers (Windows compatible)
+if hasattr(signal, 'SIGTERM'):
+    signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
 
 # Optional imports for enhanced features
 try:
@@ -269,8 +375,13 @@ WORKPLACE_TYPES = {"On-site": "1", "Remote": "2", "Hybrid": "3"}
 # --- Database Setup ---
 def init_db():
     """Initialize the SQLite database and create/update tables."""
-    conn = sqlite3.connect("job_alerts.db", check_same_thread=False)
-    cursor = conn.cursor()
+    with db_lock:
+        conn = sqlite3.connect("job_alerts.db", check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")  # Enable WAL mode for better concurrency
+        conn.execute("PRAGMA synchronous=NORMAL")  # Balance between safety and performance
+        conn.execute("PRAGMA temp_store=memory")   # Store temp data in memory
+        conn.execute("PRAGMA mmap_size=67108864")  # 64MB memory-mapped I/O
+        cursor = conn.cursor()
 
     # Table for storing user alerts
     cursor.execute("""
@@ -413,25 +524,14 @@ def init_db():
 
 
 def get_db_connection():
-    """Get a database connection with proper locking and timeout handling."""
+    """Get a database connection from the pool with proper error handling."""
     max_retries = 3
     retry_delay = 0.1
     
     for attempt in range(max_retries):
         try:
-            with db_lock:
-                conn = sqlite3.connect(
-                    "job_alerts.db", 
-                    check_same_thread=False,
-                    timeout=10.0  # 10 second timeout
-                )
-                conn.row_factory = sqlite3.Row
-                # Enable WAL mode for better concurrency
-                conn.execute("PRAGMA journal_mode=WAL;")
-                conn.execute("PRAGMA synchronous=NORMAL;")
-                # Set connection timeout to prevent hanging
-                conn.execute("PRAGMA busy_timeout=5000;")  # 5 second busy timeout
-                return conn
+            conn = db_pool.get_connection()
+            return conn
         except sqlite3.OperationalError as e:
             if "database is locked" in str(e).lower() and attempt < max_retries - 1:
                 logger.warning(f"Database locked, retrying in {retry_delay}s (attempt {attempt + 1})")
@@ -447,20 +547,53 @@ def get_db_connection():
 
 
 def safe_db_operation(operation_func, *args, **kwargs):
-    """Safely execute database operations with automatic connection cleanup"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        return operation_func(conn, *args, **kwargs)
-    except Exception as e:
-        logger.error(f"Database operation failed: {e}")
-        raise
-    finally:
-        if conn:
-            try:
-                conn.close()
-            except Exception as e:
-                logger.warning(f"Failed to close database connection: {e}")
+    """Safely execute database operations with automatic connection cleanup and retries"""
+    max_retries = 3
+    retry_delay = 0.1
+    
+    for attempt in range(max_retries):
+        if shutdown_requested.is_set():
+            raise RuntimeError("Shutdown requested, aborting database operation")
+            
+        conn = None
+        try:
+            with db_lock:
+                conn = get_db_connection()
+                result = operation_func(conn, *args, **kwargs)
+                db_pool.return_connection(conn)  # Return connection to pool
+                conn = None  # Mark as returned to avoid double-return
+                return result
+        except sqlite3.OperationalError as e:
+            if conn:
+                try:
+                    conn.close()  # Don't return corrupted connections to pool
+                except:
+                    pass
+                conn = None
+            if "database is locked" in str(e).lower() and attempt < max_retries - 1:
+                logger.warning(f"Database locked, retrying in {retry_delay}s... (attempt {attempt + 1})")
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+                continue
+            logger.error(f"Database operation failed after {attempt + 1} attempts: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Database operation failed: {e}")
+            if conn:
+                try:
+                    conn.close()  # Don't return corrupted connections to pool
+                except:
+                    pass
+            raise
+        finally:
+            # Return connection to pool if not already done
+            if conn:
+                try:
+                    db_pool.return_connection(conn)
+                except Exception as e:
+                    logger.warning(f"Failed to return database connection to pool: {e}")
+    
+    raise sqlite3.OperationalError("Database operation failed after all retries")
 
 
 # --- Data Persistence Helper ---
@@ -1542,6 +1675,75 @@ def get_memory_usage():
     except Exception:
         return 0
 
+def get_detailed_memory_info():
+    """Get detailed memory information for monitoring"""
+    try:
+        import psutil
+        import os
+        
+        process = psutil.Process(os.getpid())
+        memory_info = process.memory_info()
+        memory_percent = process.memory_percent()
+        
+        # System memory info
+        system_memory = psutil.virtual_memory()
+        
+        return {
+            'process_rss_mb': memory_info.rss / 1024 / 1024,
+            'process_vms_mb': memory_info.vms / 1024 / 1024,
+            'process_percent': memory_percent,
+            'system_total_mb': system_memory.total / 1024 / 1024,
+            'system_available_mb': system_memory.available / 1024 / 1024,
+            'system_used_percent': system_memory.percent,
+            'num_threads': process.num_threads(),
+            'cpu_percent': process.cpu_percent()
+        }
+    except Exception as e:
+        logger.warning(f"Failed to get detailed memory info: {e}")
+        return {
+            'process_rss_mb': get_memory_usage(),
+            'error': str(e)
+        }
+
+def check_memory_health():
+    """Check memory health and return status with recommendations"""
+    memory_info = get_detailed_memory_info()
+    current_memory = memory_info.get('process_rss_mb', 0)
+    
+    status = "HEALTHY"
+    recommendations = []
+    
+    # Check process memory usage
+    if current_memory > MAX_MEMORY_MB * 0.9:
+        status = "CRITICAL"
+        recommendations.append("Immediate model unload required")
+        recommendations.append("Force garbage collection")
+    elif current_memory > MAX_MEMORY_MB * 0.8:
+        status = "WARNING"
+        recommendations.append("Consider unloading model")
+        recommendations.append("Schedule memory cleanup")
+    elif current_memory > MAX_MEMORY_MB * 0.7:
+        status = "CAUTION"
+        recommendations.append("Monitor closely")
+    
+    # Check system memory
+    system_used = memory_info.get('system_used_percent', 0)
+    if system_used > 90:
+        status = "CRITICAL" if status != "CRITICAL" else status
+        recommendations.append("System memory critically low")
+    elif system_used > 80:
+        if status == "HEALTHY":
+            status = "WARNING"
+        recommendations.append("System memory high")
+    
+    return {
+        'status': status,
+        'memory_info': memory_info,
+        'current_memory_mb': current_memory,
+        'memory_usage_percent': (current_memory / MAX_MEMORY_MB) * 100,
+        'recommendations': recommendations
+    }
+
 
 def force_memory_cleanup():
     """Aggressive memory cleanup"""
@@ -1567,16 +1769,18 @@ def unload_jobbert_model():
     """Unload the JobBERT model to free memory"""
     global _global_jobbert_model, _model_load_attempted, _model_last_used, _model_usage_count
     
-    if _global_jobbert_model is not None:
-        logger.info("🗑️ Unloading JobBERT model to free memory...")
-        del _global_jobbert_model
-        _global_jobbert_model = None
-        _model_load_attempted = False
-        _model_last_used = None
-        _model_usage_count = 0
-        
-        force_memory_cleanup()
-        logger.info(f"✅ JobBERT model unloaded. Memory usage: {get_memory_usage():.1f} MB")
+    with model_lock:
+        if _global_jobbert_model is not None:
+            logger.info("🗑️ Unloading JobBERT model to free memory...")
+            del _global_jobbert_model
+            _global_jobbert_model = None
+            _model_load_attempted = False
+            _model_last_used = None
+            _model_usage_count = 0
+            
+            with memory_cleanup_lock:
+                force_memory_cleanup()
+            logger.info(f"✅ JobBERT model unloaded. Memory usage: {get_memory_usage():.1f} MB")
 
 
 def should_unload_model():
@@ -1617,54 +1821,56 @@ def get_jobbert_model():
     global _global_jobbert_model, _model_load_attempted, _model_last_used, _model_usage_count
     import time
     
-    # Check if we should unload the model first
-    if _global_jobbert_model is not None and should_unload_model():
-        unload_jobbert_model()
-    
-    # Load model if not available
-    if _global_jobbert_model is None:
-        _model_load_attempted = False  # Reset to allow reloading
-    
-    if not _model_load_attempted:
-        _model_load_attempted = True
-
-        if not SENTENCE_TRANSFORMERS_AVAILABLE:
-            logger.warning("❌ Sentence transformers not available")
-            return None
-
-        try:
-            # Pre-cleanup before loading
-            current_memory = get_memory_usage()
-            logger.info(f"💾 Current memory usage before loading: {current_memory:.1f} MB")
-            
-            if current_memory > 800:  # Cleanup if using more than 800MB
-                force_memory_cleanup()
-
-            logger.info("🤖 Loading JobBERT-v2 model (this may take a moment)...")
-            _global_jobbert_model = SentenceTransformer("TechWolf/JobBERT-v2")
-            logger.info("✅ JobBERT-v2 loaded successfully")
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to load JobBERT-v2: {e}")
-            try:
-                logger.info("🔄 Fallback: Loading all-MiniLM-L6-v2...")
-                _global_jobbert_model = SentenceTransformer("all-MiniLM-L6-v2")
-                logger.info("✅ Fallback model loaded successfully")
-            except Exception as e2:
-                logger.error(f"❌ Failed to load fallback model: {e2}")
-                _global_jobbert_model = None
-                return None
-    
-    # Update usage tracking
-    if _global_jobbert_model is not None:
-        _model_last_used = time.time()
-        _model_usage_count += 1
+    with model_lock:
+        # Check if we should unload the model first
+        if _global_jobbert_model is not None and should_unload_model():
+            unload_jobbert_model()
         
-        # Log memory usage periodically
-        if _model_usage_count % 10 == 0:
-            logger.info(f"📊 Model usage: {_model_usage_count} times, Memory: {get_memory_usage():.1f} MB")
-    
-    return _global_jobbert_model
+        # Load model if not available
+        if _global_jobbert_model is None:
+            _model_load_attempted = False  # Reset to allow reloading
+        
+        if not _model_load_attempted:
+            _model_load_attempted = True
+
+            if not SENTENCE_TRANSFORMERS_AVAILABLE:
+                logger.warning("❌ Sentence transformers not available")
+                return None
+
+            try:
+                # Pre-cleanup before loading
+                current_memory = get_memory_usage()
+                logger.info(f"💾 Current memory usage before loading: {current_memory:.1f} MB")
+                
+                if current_memory > 800:  # Cleanup if using more than 800MB
+                    with memory_cleanup_lock:
+                        force_memory_cleanup()
+
+                logger.info("🤖 Loading JobBERT-v2 model (this may take a moment)...")
+                _global_jobbert_model = SentenceTransformer("TechWolf/JobBERT-v2")
+                logger.info("✅ JobBERT-v2 loaded successfully")
+                
+            except Exception as e:
+                logger.error(f"❌ Failed to load JobBERT-v2: {e}")
+                try:
+                    logger.info("🔄 Fallback: Loading all-MiniLM-L6-v2...")
+                    _global_jobbert_model = SentenceTransformer("all-MiniLM-L6-v2")
+                    logger.info("✅ Fallback model loaded successfully")
+                except Exception as e2:
+                    logger.error(f"❌ Failed to load fallback model: {e2}")
+                    _global_jobbert_model = None
+                    return None
+        
+        # Update usage tracking
+        if _global_jobbert_model is not None:
+            _model_last_used = time.time()
+            _model_usage_count += 1
+            
+            # Log memory usage periodically
+            if _model_usage_count % 10 == 0:
+                logger.info(f"📊 Model usage: {_model_usage_count} times, Memory: {get_memory_usage():.1f} MB")
+        
+        return _global_jobbert_model
 
 
 def get_adaptive_matcher():
@@ -4374,46 +4580,128 @@ def main():
 
     def memory_aware_check_alerts(bot_instance):
         """Memory-aware alert checking with adaptive intervals"""
+        if shutdown_requested.is_set():
+            logger.info("🛑 Shutdown requested, skipping alert check")
+            return
+            
         try:
-            current_memory = get_memory_usage()
-            logger.info(f"🔍 Starting alert check cycle. Memory: {current_memory:.1f} MB")
-            
-            # Skip if memory is too high
-            if current_memory > MAX_MEMORY_MB:
-                logger.warning(f"⚠️ Skipping alert check due to high memory: {current_memory:.1f} MB")
-                force_memory_cleanup()
-                return
-            
-            # Run the actual alert check
-            check_all_alerts(bot_instance)
-            
-            # Cleanup after alert check
-            force_memory_cleanup()
-            
-            # Unload model if needed
-            if should_unload_model():
-                unload_jobbert_model()
+            with scheduler_lock:
+                current_memory = get_memory_usage()
+                logger.info(f"🔍 Starting alert check cycle. Memory: {current_memory:.1f} MB")
                 
-        except Exception as e:
-            logger.error(f"Memory-aware alert check failed: {e}")
-            force_memory_cleanup()
-
-    def periodic_memory_cleanup():
-        """Periodic memory cleanup job"""
-        try:
-            current_memory = get_memory_usage()
-            logger.info(f"🧹 Periodic cleanup. Memory: {current_memory:.1f} MB")
-            
-            if current_memory > MAX_MEMORY_MB * 0.7:  # 70% of max
-                logger.info("Running periodic memory cleanup...")
-                force_memory_cleanup()
+                # Skip if memory is too high
+                if current_memory > MAX_MEMORY_MB:
+                    logger.warning(f"⚠️ Skipping alert check due to high memory: {current_memory:.1f} MB")
+                    with memory_cleanup_lock:
+                        force_memory_cleanup()
+                    return
                 
-                # Unload model if memory is still high
-                if get_memory_usage() > MAX_MEMORY_MB * 0.8:
+                # Run the actual alert check
+                check_all_alerts(bot_instance)
+                
+                # Cleanup after alert check
+                with memory_cleanup_lock:
+                    force_memory_cleanup()
+                
+                # Unload model if needed
+                if should_unload_model():
                     unload_jobbert_model()
                     
         except Exception as e:
+            logger.error(f"Memory-aware alert check failed: {e}")
+            try:
+                with memory_cleanup_lock:
+                    force_memory_cleanup()
+            except Exception as cleanup_e:
+                logger.error(f"Failed to cleanup after error: {cleanup_e}")
+
+    def periodic_memory_cleanup():
+        """Periodic memory cleanup job"""
+        if shutdown_requested.is_set():
+            logger.info("🛑 Shutdown requested, skipping memory cleanup")
+            return
+            
+        try:
+            with memory_cleanup_lock:
+                current_memory = get_memory_usage()
+                logger.info(f"🧹 Periodic cleanup. Memory: {current_memory:.1f} MB")
+                
+                if current_memory > MAX_MEMORY_MB * 0.7:  # 70% of max
+                    logger.info("Running periodic memory cleanup...")
+                    force_memory_cleanup()
+                    
+                    # Unload model if memory is still high
+                    if get_memory_usage() > MAX_MEMORY_MB * 0.8:
+                        unload_jobbert_model()
+                        
+        except Exception as e:
             logger.error(f"Periodic cleanup failed: {e}")
+            # Don't retry cleanup here to avoid infinite loops
+
+    def heartbeat_check():
+        """Enhanced heartbeat mechanism with detailed health monitoring"""
+        if shutdown_requested.is_set():
+            logger.info("🛑 Shutdown requested, skipping heartbeat")
+            return
+            
+        try:
+            with heartbeat_lock:
+                current_time = datetime.now().strftime("%H:%M:%S")
+                health_check = check_memory_health()
+                status = health_check['status']
+                current_memory = health_check['current_memory_mb']
+                usage_percent = health_check['memory_usage_percent']
+                
+                # Determine heartbeat emoji based on status
+                status_emoji = {
+                    'HEALTHY': '💚',
+                    'CAUTION': '💛', 
+                    'WARNING': '🧡',
+                    'CRITICAL': '🔴'
+                }.get(status, '💓')
+                
+                # Check if heartbeat is still active
+                if heartbeat_active.is_set():
+                    logger.info(f"{status_emoji} Heartbeat {current_time} - Memory: {current_memory:.1f}MB ({usage_percent:.1f}%) - Status: {status}")
+                    
+                    # Log detailed info for non-healthy states
+                    if status != 'HEALTHY':
+                        memory_info = health_check['memory_info']
+                        logger.warning(f"📊 System Memory: {memory_info.get('system_used_percent', 0):.1f}% used, "
+                                     f"Threads: {memory_info.get('num_threads', 0)}, "
+                                     f"CPU: {memory_info.get('cpu_percent', 0):.1f}%")
+                        
+                        # Log recommendations
+                        for rec in health_check['recommendations']:
+                            logger.info(f"💡 Recommendation: {rec}")
+                            
+                        # Auto-execute critical recommendations
+                        if status == 'CRITICAL':
+                            logger.critical("🆘 CRITICAL STATUS - EXECUTING EMERGENCY MEASURES")
+                            try:
+                                if _global_jobbert_model is not None:
+                                    unload_jobbert_model()
+                                    logger.info("✅ Emergency model unload completed")
+                                
+                                with memory_cleanup_lock:
+                                    force_memory_cleanup()
+                                    logger.info("✅ Emergency cleanup completed")
+                            except Exception as emergency_e:
+                                logger.critical(f"❌ Emergency measures failed: {emergency_e}")
+                else:
+                    logger.warning(f"⚠️ Heartbeat {current_time} - Status: SHUTTING DOWN")
+                    
+        except Exception as e:
+            logger.error(f"💔 Heartbeat failed: {e}")
+            # This is critical - if heartbeat fails, something is very wrong
+            try:
+                logger.critical("🆘 SYSTEM HEALTH CHECK FAILED - POTENTIAL CRASH IMMINENT")
+                with memory_cleanup_lock:
+                    force_memory_cleanup()
+            except Exception as critical_e:
+                logger.critical(f"🆘 CRITICAL CLEANUP FAILED: {critical_e}")
+                # Last resort - request shutdown
+                shutdown_requested.set()
 
     try:
         bot_instance = Bot(token=token)
@@ -4446,10 +4734,21 @@ def main():
             id="operation_cleanup"
         )
         
+        # Add heartbeat mechanism every 2 minutes
+        scheduler.add_job(
+            heartbeat_check,
+            "interval",
+            minutes=2,
+            max_instances=1,
+            id="heartbeat_check"
+        )
+        
         scheduler.start()
         logger.info("🚀 Background scheduler started:")
         logger.info("   - Alert checks every 30 minutes (memory-aware)")
         logger.info("   - Memory cleanup every 15 minutes")
+        logger.info("   - Heartbeat monitoring every 2 minutes")
+        logger.info("   - Stuck operation cleanup every 5 minutes")
         
     except Exception as e:
         logger.error(f"Failed to start scheduler: {e}")
@@ -4681,16 +4980,33 @@ def main():
     finally:
         logger.info("Shutting down bot...")
         try:
+            # Signal graceful shutdown
+            with global_state_lock:
+                shutdown_requested.set()
+                heartbeat_active.clear()
+            
+            # Shutdown scheduler
             scheduler.shutdown(wait=False)
+            logger.info("✅ Scheduler shutdown complete")
+            
+            # Shutdown thread pool
             executor.shutdown(wait=False)
+            logger.info("✅ Thread pool shutdown complete")
+            
+            # Close database pool
+            db_pool.close_all()
+            logger.info("✅ Database pool closed")
+            
             # Clear global models to free memory
             global _global_jobbert_model, _global_adaptive_matcher
             _global_jobbert_model = None
             _global_adaptive_matcher = None
             gc.collect()
+            logger.info("✅ Memory cleanup complete")
+            
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
-        logger.info("Bot shutdown complete.")
+        logger.info("🛑 Bot shutdown complete.")
 
 
 if __name__ == "__main__":
