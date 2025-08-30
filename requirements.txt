@@ -1,4 +1,4 @@
-# Updated dependencies for security
+# Updated dependencies for security - final check
 APScheduler==3.11.0
 beautifulsoup4==4.13.5
 cachetools==6.2.0
