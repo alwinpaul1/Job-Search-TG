@@ -867,6 +867,14 @@ def main_menu(update: Update, context: CallbackContext):
     return MAIN_MENU
 
 
+def start_from_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+    text, keyboard = make_main_menu(context)
+    query.edit_message_text(text, reply_markup=keyboard)
+    return MAIN_MENU
+
+
 def about(update: Update, context: CallbackContext):
     query = update.callback_query
     query.answer()
@@ -4393,6 +4401,9 @@ def check_single_alert(alert, bot: Bot):
                     InlineKeyboardButton(
                         "📋 My Alerts", callback_data="my_alerts"
                     )
+                ],
+                [
+                    InlineKeyboardButton("🏠 Start", callback_data="start_command")
                 ]
             ]
 
@@ -4812,6 +4823,7 @@ def main():
                                      pattern="^start_search$"),
                 CallbackQueryHandler(alerts_menu, pattern="^set_alert$"),
                 CallbackQueryHandler(my_alerts, pattern="^my_alerts$"),
+                CallbackQueryHandler(start_from_callback, pattern="^start_command$"),
             ],
             PREFERENCES_MENU: [
                 CallbackQueryHandler(show_date_posted_menu,
@@ -4825,11 +4837,13 @@ def main():
                 CallbackQueryHandler(set_timezone_start,
                                      pattern="^set_timezone$"),
                 CallbackQueryHandler(main_menu, pattern="^main_menu$"),
+                CallbackQueryHandler(start_from_callback, pattern="^start_command$"),
             ],
             ALERTS_MENU: [
                 CallbackQueryHandler(add_alert_start, pattern="^add_alert$"),
                 CallbackQueryHandler(my_alerts, pattern="^my_alerts$"),
                 CallbackQueryHandler(main_menu, pattern="^main_menu$"),
+                CallbackQueryHandler(start_from_callback, pattern="^start_command$"),
             ],
             MY_ALERTS: [
                 CallbackQueryHandler(add_alert_start, pattern="^add_alert$"),
@@ -4845,6 +4859,7 @@ def main():
                                      pattern="^delete_alert_confirm_"),
                 CallbackQueryHandler(my_alerts,
                                      pattern="^my_alerts$"),
+                CallbackQueryHandler(start_from_callback, pattern="^start_command$"),
             ],
             ADD_ALERT_KEYWORD: [
                 MessageHandler(TEXT_FILTER & ~COMMAND_FILTER,
