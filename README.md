@@ -64,19 +64,19 @@ A powerful Telegram bot for intelligent job searching and automated job alerts u
 
 ### Core Dependencies
 - `python-telegram-bot==13.15` - Telegram Bot API wrapper
-- `beautifulsoup4==4.12.2` - Web scraping
-- `requests==2.31.0` - HTTP requests
-- `python-dotenv==1.1.0` - Environment variable management
+- `beautifulsoup4==4.13.5` - Web scraping
+- `requests==2.32.4` - HTTP requests
+- `python-dotenv==1.1.1` - Environment variable management
 
 ### AI & Machine Learning
-- `scikit-learn==1.5.0` - Machine learning algorithms
-- `sentence-transformers==2.7.0` - Semantic text embeddings
-- `numpy==1.26.4` - Numerical computing
+- `scikit-learn==1.7.1` - Machine learning algorithms
+- `sentence-transformers==5.1.0` - Semantic text embeddings
+- `numpy==2.3.2` - Numerical computing
 
 ### Scheduling & Utilities
-- `APScheduler==3.6.3` - Background job scheduling
+- `APScheduler==3.11.0` - Background job scheduling
 - `pytz==2025.2` - Timezone handling
-- `psutil==5.9.8` - System monitoring
+- `psutil==7.0.0` - System monitoring
 
 ## Usage
 
