@@ -84,6 +84,8 @@ A powerful Telegram bot for intelligent job searching and automated job alerts u
 - `beautifulsoup4==4.13.5` - Web scraping
 - `requests==2.32.4` - HTTP requests
 - `python-dotenv==1.1.1` - Environment variable management
+- `cachetools==4.2.2` - LRU cache implementation
+- `tornado==6.1` - Web framework and asynchronous networking
 
 ### AI & Machine Learning
 - `scikit-learn==1.7.1` - Machine learning algorithms
@@ -91,9 +93,20 @@ A powerful Telegram bot for intelligent job searching and automated job alerts u
 - `numpy==2.3.2` - Numerical computing
 
 ### Scheduling & Utilities
-- `APScheduler==3.11.0` - Background job scheduling
+- `APScheduler==3.6.3` - Background job scheduling
 - `pytz==2025.2` - Timezone handling
 - `psutil==7.0.0` - System monitoring
+
+### Additional Dependencies
+- `lxml==6.0.1` - XML/HTML processing
+- `urllib3==2.5.0` - HTTP client library
+- `openai==1.102.0` - OpenAI API client
+- `certifi==2025.4.26` - Certificate validation
+- `charset-normalizer==3.4.2` - Character encoding detection
+- `idna==3.10` - Internationalized domain names
+- `six==1.17.0` - Python 2/3 compatibility utilities
+- `soupsieve==2.8` - CSS selector library
+- `tzlocal==5.3.1` - System timezone detection
 
 ## Usage
 
