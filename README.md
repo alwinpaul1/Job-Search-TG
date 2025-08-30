@@ -33,6 +33,7 @@ A powerful Telegram bot for intelligent job searching and automated job alerts u
 
 ### Prerequisites
 - Python 3.8 or higher
+- [uv](https://github.com/astral-sh/uv) - Fast Python package manager (recommended) or pip
 - Telegram Bot Token (get from [@BotFather](https://t.me/botfather))
 - LinkedIn access (for job scraping)
 
@@ -44,18 +45,34 @@ A powerful Telegram bot for intelligent job searching and automated job alerts u
    cd Job-Search-TG
    ```
 
-2. **Install dependencies**
+2. **Install uv (if not already installed)**
    ```bash
+   # macOS/Linux
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   
+   # Windows
+   powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+   
+   # Alternative: pip install uv
+   pip install uv
+   ```
+
+3. **Install dependencies**
+   ```bash
+   # Using uv (recommended - faster)
+   uv pip install -r requirements.txt
+   
+   # Alternative: using pip
    pip install -r requirements.txt
    ```
 
-3. **Set up environment variables**
+4. **Set up environment variables**
    Create a `.env` file in the project root:
    ```env
    TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
    ```
 
-4. **Run the bot**
+5. **Run the bot**
    ```bash
    python bot.py
    ```
