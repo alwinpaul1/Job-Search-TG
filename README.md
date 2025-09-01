@@ -168,3 +168,4 @@ The bot uses SQLite for storing:
 - Concurrent operations: Up to 10 workers
 
  
+# Cache refresh
