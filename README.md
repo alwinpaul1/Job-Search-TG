@@ -167,5 +167,4 @@ The bot uses SQLite for storing:
 - Background tasks: Managed by APScheduler
 - Concurrent operations: Up to 10 workers
 
- 
-# Cache refresh
+
