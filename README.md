@@ -163,7 +163,7 @@ The bot uses SQLite for storing:
 - Timezone settings
 
 ### Scheduling
-- Alert checks: Every 60 minutes
+- Alert checks: Every 30 minutes
 - Background tasks: Managed by APScheduler
 - Concurrent operations: Up to 10 workers
 
