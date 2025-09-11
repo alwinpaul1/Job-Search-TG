@@ -868,6 +868,15 @@ def main_menu(update: Update, context: CallbackContext):
 
 
 def start_from_callback(update: Update, context: CallbackContext):
+    # Debounce the start button callback
+    now = time.time()
+    last_call = context.user_data.get("last_start_callback_call", 0)
+    if now - last_call < 2:
+        query = update.callback_query
+        query.answer()
+        return None
+    context.user_data["last_start_callback_call"] = now
+    
     query = update.callback_query
     query.answer()
     text, keyboard = make_main_menu(context)
