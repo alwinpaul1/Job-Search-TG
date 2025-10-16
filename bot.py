@@ -4750,7 +4750,7 @@ def main():
         scheduler.add_job(
             memory_aware_check_alerts, 
             "interval", 
-            minutes=30,  # Reduced to 30 minutes with memory management
+            minutes=60,  # Changed to 1 hour for less frequent job detection
             args=[bot_instance], 
             max_instances=1,
             id="alert_checker"
@@ -4785,7 +4785,7 @@ def main():
         
         scheduler.start()
         logger.info("🚀 Background scheduler started:")
-        logger.info("   - Alert checks every 30 minutes (memory-aware)")
+        logger.info("   - Alert checks every 1 hour (memory-aware)")
         logger.info("   - Memory cleanup every 15 minutes")
         logger.info("   - Heartbeat monitoring every 2 minutes")
         logger.info("   - Stuck operation cleanup every 5 minutes")

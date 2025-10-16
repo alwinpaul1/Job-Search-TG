@@ -22,3 +22,6 @@ CLAUDE.md
 
 # Backup/alternative bot files
 bot1.py 
+
+# Log files
+alert_monitor.log
