@@ -934,19 +934,19 @@ def admin_stats(update: Update, context: CallbackContext):
         cursor.execute("SELECT COUNT(*) FROM alerts WHERE is_active = 0")
         paused_alerts = cursor.fetchone()[0]
 
-        # Get alerts created in last 24 hours
+        # Get alerts checked in last 24 hours (using last_checked as proxy for activity)
         cursor.execute("""
             SELECT COUNT(*) FROM alerts
-            WHERE datetime(created_at) > datetime('now', '-1 day')
+            WHERE datetime(last_checked) > datetime('now', '-1 day')
         """)
-        new_alerts_24h = cursor.fetchone()[0]
+        active_alerts_24h = cursor.fetchone()[0]
 
-        # Get alerts created in last 7 days
+        # Get alerts checked in last 7 days
         cursor.execute("""
             SELECT COUNT(*) FROM alerts
-            WHERE datetime(created_at) > datetime('now', '-7 days')
+            WHERE datetime(last_checked) > datetime('now', '-7 days')
         """)
-        new_alerts_7d = cursor.fetchone()[0]
+        active_alerts_7d = cursor.fetchone()[0]
 
         # Get total jobs sent
         cursor.execute("SELECT COUNT(*) FROM sent_jobs")
@@ -993,9 +993,9 @@ def admin_stats(update: Update, context: CallbackContext):
 • Paused Alerts: {paused_alerts}
 • Total Alerts: {active_alerts + paused_alerts}
 
-📈 **Growth**
-• New Alerts (24h): {new_alerts_24h}
-• New Alerts (7d): {new_alerts_7d}
+📈 **Activity**
+• Active Alerts (24h): {active_alerts_24h}
+• Active Alerts (7d): {active_alerts_7d}
 
 💼 **Job Notifications**
 • Total Jobs Sent: {total_jobs_sent}
