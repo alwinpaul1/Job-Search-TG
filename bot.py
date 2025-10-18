@@ -1921,7 +1921,14 @@ def get_jobbert_model():
     logger.info(f"🔍 [DIAG] Attempting to acquire model_lock...")
     lock_start_time = time.time()
 
-    with model_lock:
+    # Try to acquire lock with timeout to prevent infinite hangs
+    lock_acquired = model_lock.acquire(timeout=60)  # 60 second timeout
+    if not lock_acquired:
+        logger.error(f"🚨 [CRITICAL] Failed to acquire model_lock after 60 seconds - possible deadlock!")
+        logger.error(f"🔍 [DIAG] Lock timeout - another thread may be stuck. Returning None to prevent cascading hang.")
+        return None
+
+    try:
         lock_acquired_time = time.time()
         logger.info(f"🔍 [DIAG] model_lock acquired in {lock_acquired_time - lock_start_time:.3f} seconds")
 
@@ -1956,11 +1963,19 @@ def get_jobbert_model():
                     with memory_cleanup_lock:
                         force_memory_cleanup()
                     logger.info(f"🔍 [DIAG] Memory cleanup completed in {time.time() - cleanup_start:.3f} seconds")
+                    current_memory = get_memory_usage()  # Re-check after cleanup
 
                 logger.info("🤖 Loading JobBERT-v2 model (this may take a moment)...")
                 resources_before_model = get_system_resources()
                 logger.info(f"🔍 [STAGE] MODEL_LOAD_START | model=JobBERT-v2")
                 logger.info(f"🔍 [RESOURCE] BEFORE_MODEL | mem={resources_before_model['mem_mb']:.1f}MB | cpu={resources_before_model['cpu_pct']:.1f}% | sys_mem_avail={resources_before_model['sys_mem_avail_mb']:.1f}MB | disk_read={resources_before_model['disk_read_mb']:.1f}MB")
+
+                # Check if there's enough available memory to load model (needs ~1GB)
+                sys_mem_avail = resources_before_model.get('sys_mem_avail_mb', 1000)
+                if sys_mem_avail < 500:  # Less than 500MB available
+                    logger.error(f"🚨 [CRITICAL] Insufficient memory to load model! Available: {sys_mem_avail:.1f}MB, Need: ~1000MB")
+                    logger.warning("⚠️ System may hang or swap heavily. Attempting load anyway with swap...")
+                    # Continue anyway since we now have swap space
                 logger.info(f"🔍 [DIAG] About to call SentenceTransformer('TechWolf/JobBERT-v2')...")
                 model_load_start = time.time()
 
@@ -2007,6 +2022,11 @@ def get_jobbert_model():
 
         logger.info(f"🔍 [DIAG] Exiting get_jobbert_model(), returning {'model' if _global_jobbert_model else 'None'}")
         return _global_jobbert_model
+
+    finally:
+        # CRITICAL: Always release the lock, even if an exception occurs
+        model_lock.release()
+        logger.info(f"🔍 [DIAG] model_lock released successfully")
 
 
 def get_adaptive_matcher():
