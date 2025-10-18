@@ -68,6 +68,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Diagnostic logger - logs to both file and console
+diagnostic_file_handler = logging.FileHandler("diagnostic.log")
+diagnostic_file_handler.setFormatter(
+    logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+)
+logger.addHandler(diagnostic_file_handler)
+
 # Alert monitoring logger
 alert_logger = logging.getLogger("alert_monitor")
 alert_handler = logging.FileHandler("alert_monitor.log")
@@ -1849,56 +1856,94 @@ def get_jobbert_model():
     """Get or load the JobBERT model with intelligent memory management"""
     global _global_jobbert_model, _model_load_attempted, _model_last_used, _model_usage_count
     import time
-    
+    import threading
+
+    current_thread = threading.current_thread().name
+    logger.info(f"🔍 [DIAG] get_jobbert_model() called by thread: {current_thread}")
+    logger.info(f"🔍 [DIAG] Current model state: _global_jobbert_model={'loaded' if _global_jobbert_model else 'None'}, _model_load_attempted={_model_load_attempted}")
+
+    logger.info(f"🔍 [DIAG] Attempting to acquire model_lock...")
+    lock_start_time = time.time()
+
     with model_lock:
+        lock_acquired_time = time.time()
+        logger.info(f"🔍 [DIAG] model_lock acquired in {lock_acquired_time - lock_start_time:.3f} seconds")
+
         # Check if we should unload the model first
         if _global_jobbert_model is not None and should_unload_model():
+            logger.info(f"🔍 [DIAG] Model needs to be unloaded")
             unload_jobbert_model()
-        
+
         # Load model if not available
         if _global_jobbert_model is None:
+            logger.info(f"🔍 [DIAG] Model is None, resetting _model_load_attempted")
             _model_load_attempted = False  # Reset to allow reloading
-        
+
         if not _model_load_attempted:
+            logger.info(f"🔍 [DIAG] Starting model load attempt...")
             _model_load_attempted = True
 
             if not SENTENCE_TRANSFORMERS_AVAILABLE:
                 logger.warning("❌ Sentence transformers not available")
+                logger.error(f"🔍 [DIAG] CRITICAL: sentence-transformers library not available!")
                 return None
 
             try:
                 # Pre-cleanup before loading
                 current_memory = get_memory_usage()
                 logger.info(f"💾 Current memory usage before loading: {current_memory:.1f} MB")
-                
+                logger.info(f"🔍 [DIAG] Memory check complete, current_memory={current_memory:.1f} MB")
+
                 if current_memory > 800:  # Cleanup if using more than 800MB
+                    logger.info(f"🔍 [DIAG] Memory > 800MB, attempting cleanup with memory_cleanup_lock...")
+                    cleanup_start = time.time()
                     with memory_cleanup_lock:
                         force_memory_cleanup()
+                    logger.info(f"🔍 [DIAG] Memory cleanup completed in {time.time() - cleanup_start:.3f} seconds")
 
                 logger.info("🤖 Loading JobBERT-v2 model (this may take a moment)...")
+                logger.info(f"🔍 [DIAG] About to call SentenceTransformer('TechWolf/JobBERT-v2')...")
+                model_load_start = time.time()
+
                 _global_jobbert_model = SentenceTransformer("TechWolf/JobBERT-v2")
-                logger.info("✅ JobBERT-v2 loaded successfully")
-                
+
+                model_load_end = time.time()
+                logger.info(f"✅ JobBERT-v2 loaded successfully in {model_load_end - model_load_start:.3f} seconds")
+                logger.info(f"🔍 [DIAG] Model loaded successfully, type: {type(_global_jobbert_model)}")
+
             except Exception as e:
                 logger.error(f"❌ Failed to load JobBERT-v2: {e}")
+                logger.error(f"🔍 [DIAG] Exception details:", exc_info=True)
                 try:
                     logger.info("🔄 Fallback: Loading all-MiniLM-L6-v2...")
+                    logger.info(f"🔍 [DIAG] Attempting fallback model load...")
+                    fallback_start = time.time()
+
                     _global_jobbert_model = SentenceTransformer("all-MiniLM-L6-v2")
-                    logger.info("✅ Fallback model loaded successfully")
+
+                    logger.info(f"✅ Fallback model loaded successfully in {time.time() - fallback_start:.3f} seconds")
+                    logger.info(f"🔍 [DIAG] Fallback model loaded successfully")
                 except Exception as e2:
                     logger.error(f"❌ Failed to load fallback model: {e2}")
+                    logger.error(f"🔍 [DIAG] Fallback model also failed:", exc_info=True)
                     _global_jobbert_model = None
                     return None
-        
+        else:
+            logger.info(f"🔍 [DIAG] Model already loaded, skipping load attempt")
+
         # Update usage tracking
         if _global_jobbert_model is not None:
             _model_last_used = time.time()
             _model_usage_count += 1
-            
+            logger.info(f"🔍 [DIAG] Model usage updated: count={_model_usage_count}, last_used={_model_last_used}")
+
             # Log memory usage periodically
             if _model_usage_count % 10 == 0:
                 logger.info(f"📊 Model usage: {_model_usage_count} times, Memory: {get_memory_usage():.1f} MB")
-        
+        else:
+            logger.error(f"🔍 [DIAG] WARNING: Returning None - model failed to load!")
+
+        logger.info(f"🔍 [DIAG] Exiting get_jobbert_model(), returning {'model' if _global_jobbert_model else 'None'}")
         return _global_jobbert_model
 
 
@@ -1947,37 +1992,55 @@ class AdaptiveJobBERTMatcher:
 
     def calculate_adaptive_relevance(self, jobs, query):
         """Use JobBERT's natural understanding to filter jobs adaptively with memory management"""
+        import time
+        logger.info(f"🔍 [DIAG] calculate_adaptive_relevance() called with {len(jobs)} jobs, query='{query}'")
+
         # Get fresh model instance (handles memory management internally)
+        logger.info(f"🔍 [DIAG] Calling get_jobbert_model()...")
+        model_fetch_start = time.time()
         model = get_jobbert_model()
-        
+        logger.info(f"🔍 [DIAG] get_jobbert_model() returned in {time.time() - model_fetch_start:.3f} seconds, model={'loaded' if model else 'None'}")
+
         if not model:
             logger.info("🔄 JobBERT not available, using fallback filtering")
+            logger.error(f"🔍 [DIAG] Model is None, falling back to basic filter")
             return self._fallback_basic_filter(jobs, query)
 
         job_embeddings = None
         query_embedding = None
         similarities = None
-        
+
         try:
             memory_before = get_memory_usage()
             logger.debug(f"🤖 Processing {len(jobs)} jobs with JobBERT... Memory: {memory_before:.1f} MB")
+            logger.info(f"🔍 [DIAG] Memory before encoding: {memory_before:.1f} MB")
 
             # Step 1: Encode everything with JobBERT
+            logger.info(f"🔍 [DIAG] Creating job_texts list from {len(jobs)} jobs...")
             job_texts = [f"{job['Title']} {job['Company']}" for job in jobs]
+            logger.info(f"🔍 [DIAG] job_texts created, length={len(job_texts)}")
 
             # Batch processing with error handling and memory monitoring
             try:
                 # Monitor memory during encoding
                 if memory_before > MAX_MEMORY_MB * 0.8:  # 80% of max memory
                     logger.warning(f"⚠️ High memory before encoding: {memory_before:.1f} MB")
+                    logger.info(f"🔍 [DIAG] High memory detected, running cleanup...")
                     force_memory_cleanup()
-                
+
+                logger.info(f"🔍 [DIAG] About to encode {len(job_texts)} job texts with model.encode()...")
+                encode_start = time.time()
                 job_embeddings = model.encode(
                     job_texts, show_progress_bar=False, convert_to_tensor=False
                 )
+                logger.info(f"🔍 [DIAG] Job embeddings created in {time.time() - encode_start:.3f} seconds, shape={getattr(job_embeddings, 'shape', 'N/A')}")
+
+                logger.info(f"🔍 [DIAG] About to encode query with model.encode()...")
+                query_encode_start = time.time()
                 query_embedding = model.encode(
                     [query], show_progress_bar=False, convert_to_tensor=False
                 )
+                logger.info(f"🔍 [DIAG] Query embedding created in {time.time() - query_encode_start:.3f} seconds, shape={getattr(query_embedding, 'shape', 'N/A')}")
                 
                 memory_after_encoding = get_memory_usage()
                 logger.debug(f"📊 Memory after encoding: {memory_after_encoding:.1f} MB (+{memory_after_encoding - memory_before:.1f} MB)")
@@ -2688,8 +2751,9 @@ def scrape_linkedin_with_adaptive_jobbert(
     keyword, location, filters_dict,
     max_pages=None, progress_msg=None, user_id=None
 ):
-    """Adaptive JobBERT filtering with memory management (thread-safe).""" 
+    """Adaptive JobBERT filtering with memory management (thread-safe)."""
     import gc
+    import time
     all_scraped_jobs = []
     seen_job_ids = set()
     seen_canonical_pairs = set()
@@ -2837,7 +2901,10 @@ def scrape_linkedin_with_adaptive_jobbert(
             ParseMode.MARKDOWN
         )
 
+    logger.info(f"🔍 [DIAG] About to call get_adaptive_matcher()...")
+    matcher_start = time.time()
     adaptive_matcher = get_adaptive_matcher()
+    logger.info(f"🔍 [DIAG] get_adaptive_matcher() returned in {time.time() - matcher_start:.3f} seconds, matcher={'valid' if adaptive_matcher else 'None'}")
 
     logger.info(f"🔍 FILTER DEBUG: Starting analysis of query '{keyword}'")
 
@@ -2898,12 +2965,17 @@ def scrape_linkedin_with_adaptive_jobbert(
         )
         safe_progress_update(progress_msg, progress_text, ParseMode.MARKDOWN)
 
+    logger.info(f"🔍 [DIAG] About to call adaptive_matcher.calculate_adaptive_relevance() with {len(jobs_to_analyze)} jobs")
+    ai_filter_start = time.time()
+
     try:
         final_jobs = adaptive_matcher.calculate_adaptive_relevance(
             jobs_to_analyze, keyword
         )
+        logger.info(f"🔍 [DIAG] calculate_adaptive_relevance() completed in {time.time() - ai_filter_start:.3f} seconds, returned {len(final_jobs)} jobs")
     except MemoryError as e:
         logger.error(f"🚨 Memory error in JobBERT processing: {e}")
+        logger.error(f"🔍 [DIAG] MemoryError in calculate_adaptive_relevance after {time.time() - ai_filter_start:.3f} seconds", exc_info=True)
         logger.warning("⚠️ Running garbage collection and falling back to basic filtering...")
         gc.collect()
         final_jobs = adaptive_matcher._fallback_basic_filter(
@@ -2911,6 +2983,7 @@ def scrape_linkedin_with_adaptive_jobbert(
         )
     except Exception as e:
         logger.error(f"🚨 AdaptiveJobBERTMatcher failed: {e}", exc_info=True)
+        logger.error(f"🔍 [DIAG] Exception in calculate_adaptive_relevance after {time.time() - ai_filter_start:.3f} seconds", exc_info=True)
         logger.warning("⚠️ Falling back to basic filtering due to error.")
         final_jobs = adaptive_matcher._fallback_basic_filter(
             jobs_to_analyze, keyword
@@ -2966,11 +3039,18 @@ def run_scrape_threaded(
     update: Update, context: CallbackContext, progress_msg
 ):
     """Thread-safe version of run_scrape that notifies the user if the AI is busy."""
+    import time
+    import threading
+
     user_id = update.effective_user.id
+    current_thread = threading.current_thread().name
+    logger.info(f"🔍 [DIAG] run_scrape_threaded() called for user {user_id} by thread {current_thread}")
 
     try:
         search_keyword = context.user_data.get("search_keywords")
         search_location = context.user_data.get("search_location")
+        logger.info(f"🔍 [DIAG] Search params: keyword='{search_keyword}', location='{search_location}'")
+
         prefs = get_user_prefs(context)
 
         filters = {
@@ -2979,13 +3059,17 @@ def run_scrape_threaded(
             "f_TPR": list(prefs["date_posted"].values())[0] if prefs["date_posted"] else None,
             "f_WT": ",".join(prefs["workplace"].values()) if prefs["workplace"] else None,
         }
+        logger.info(f"🔍 [DIAG] Filters: {filters}")
 
         logger.info(f"User {user_id} is attempting to start a live search.")
+        logger.info(f"🔍 [DIAG] Attempting to acquire search_ai_lock (non-blocking)...")
+        lock_attempt_start = time.time()
 
         # Try to acquire the search AI lock without blocking
         if not search_ai_lock.acquire(blocking=False):
             # The lock is busy. Notify the user and then wait.
             logger.info(f"AI lock is busy. Notifying user {user_id} that they are queued.")
+            logger.info(f"🔍 [DIAG] search_ai_lock is busy, user queued. Now attempting blocking acquire...")
             safe_progress_update(
                 progress_msg,
                 "⏳ **Please Wait...**\n\nThe bot is processing a background task. "
@@ -2993,12 +3077,18 @@ def run_scrape_threaded(
                 ParseMode.MARKDOWN
             )
             # Now, block and wait until the lock is released.
+            blocking_start = time.time()
             search_ai_lock.acquire()
             logger.info(f"Search AI lock acquired for user {user_id} after waiting.")
+            logger.info(f"🔍 [DIAG] search_ai_lock acquired after {time.time() - blocking_start:.3f} seconds of blocking")
+        else:
+            logger.info(f"🔍 [DIAG] search_ai_lock acquired immediately (non-blocking) in {time.time() - lock_attempt_start:.3f} seconds")
 
         # At this point, we are GUARANTEED to have the lock.
+        logger.info(f"🔍 [DIAG] search_ai_lock is held, proceeding with search...")
         try:
             # Notify the user that their search is now actively running.
+            logger.info(f"🔍 [DIAG] Updating progress message to 'search is running'...")
             safe_progress_update(
                 progress_msg,
                 "🚀 **Your search is now running...**\n\n"
@@ -3006,10 +3096,13 @@ def run_scrape_threaded(
                 ParseMode.MARKDOWN
             )
 
+            logger.info(f"🔍 [DIAG] About to call scrape_linkedin_with_adaptive_jobbert()...")
+            scrape_start = time.time()
             sorted_jobs = scrape_linkedin_with_adaptive_jobbert(
                 search_keyword, search_location, filters,
                 progress_msg=progress_msg, user_id=user_id,
             )
+            logger.info(f"🔍 [DIAG] scrape_linkedin_with_adaptive_jobbert() completed in {time.time() - scrape_start:.3f} seconds, returned {len(sorted_jobs) if sorted_jobs else 0} jobs")
 
             if not sorted_jobs:
                 safe_progress_update(progress_msg, "Search complete. No jobs found with these criteria.")
