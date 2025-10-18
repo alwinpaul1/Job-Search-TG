@@ -1921,12 +1921,28 @@ def get_jobbert_model():
     logger.info(f"🔍 [DIAG] Attempting to acquire model_lock...")
     lock_start_time = time.time()
 
-    # Try to acquire lock with timeout to prevent infinite hangs
-    lock_acquired = model_lock.acquire(timeout=60)  # 60 second timeout
-    if not lock_acquired:
-        logger.error(f"🚨 [CRITICAL] Failed to acquire model_lock after 60 seconds - possible deadlock!")
-        logger.error(f"🔍 [DIAG] Lock timeout - another thread may be stuck. Returning None to prevent cascading hang.")
-        return None
+    # Try to acquire lock with timeout and retry logic to prevent infinite hangs
+    max_retries = 3
+    retry_count = 0
+    lock_acquired = False
+
+    while retry_count < max_retries and not lock_acquired:
+        lock_acquired = model_lock.acquire(timeout=60)  # 60 second timeout per attempt
+
+        if not lock_acquired:
+            retry_count += 1
+            elapsed = time.time() - lock_start_time
+            logger.warning(f"⚠️ Failed to acquire model_lock (attempt {retry_count}/{max_retries}, elapsed={elapsed:.1f}s)")
+
+            if retry_count < max_retries:
+                logger.info(f"🔄 Retrying lock acquisition in 5 seconds...")
+                time.sleep(5)
+            else:
+                logger.error(f"🚨 [CRITICAL] Failed to acquire model_lock after {max_retries} attempts ({elapsed:.1f}s total)")
+                logger.error(f"🔍 [DIAG] Possible deadlock detected. This indicates another thread crashed while holding the lock.")
+                logger.error(f"💡 RECOMMENDATION: Restart the bot to clear the deadlock.")
+                # Return None - the calling code will handle this gracefully
+                return None
 
     try:
         lock_acquired_time = time.time()
@@ -2084,9 +2100,12 @@ class AdaptiveJobBERTMatcher:
         logger.info(f"🔍 [DIAG] get_jobbert_model() returned in {time.time() - model_fetch_start:.3f} seconds, model={'loaded' if model else 'None'}")
 
         if not model:
-            logger.info("🔄 JobBERT not available, using fallback filtering")
-            logger.error(f"🔍 [DIAG] Model is None, falling back to basic filter")
-            return self._fallback_basic_filter(jobs, query)
+            logger.error("🚨 [CRITICAL] JobBERT model unavailable - likely due to deadlock!")
+            logger.error(f"🔍 [DIAG] Model is None after lock timeout. AI filtering cannot proceed.")
+            logger.error(f"💡 ACTION REQUIRED: Restart the bot to clear the deadlock and enable AI filtering.")
+            logger.error(f"⚠️ Returning empty results - AI filtering is REQUIRED, not using basic fallback.")
+            # Return empty to signal failure - AI filtering is mandatory
+            return []
 
         job_embeddings = None
         query_embedding = None
