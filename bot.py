@@ -1902,12 +1902,14 @@ def get_jobbert_model():
                     logger.info(f"🔍 [DIAG] Memory cleanup completed in {time.time() - cleanup_start:.3f} seconds")
 
                 logger.info("🤖 Loading JobBERT-v2 model (this may take a moment)...")
+                logger.info(f"🔍 [STAGE] MODEL_LOAD_START | model=JobBERT-v2")
                 logger.info(f"🔍 [DIAG] About to call SentenceTransformer('TechWolf/JobBERT-v2')...")
                 model_load_start = time.time()
 
                 _global_jobbert_model = SentenceTransformer("TechWolf/JobBERT-v2")
 
                 model_load_end = time.time()
+                logger.info(f"🔍 [STAGE] MODEL_LOAD_COMPLETE | model=JobBERT-v2 | time={model_load_end - model_load_start:.3f}s")
                 logger.info(f"✅ JobBERT-v2 loaded successfully in {model_load_end - model_load_start:.3f} seconds")
                 logger.info(f"🔍 [DIAG] Model loaded successfully, type: {type(_global_jobbert_model)}")
 
@@ -2028,18 +2030,22 @@ class AdaptiveJobBERTMatcher:
                     logger.info(f"🔍 [DIAG] High memory detected, running cleanup...")
                     force_memory_cleanup()
 
+                logger.info(f"🔍 [STAGE] ENCODING_JOBS_START | jobs={len(job_texts)}")
                 logger.info(f"🔍 [DIAG] About to encode {len(job_texts)} job texts with model.encode()...")
                 encode_start = time.time()
                 job_embeddings = model.encode(
                     job_texts, show_progress_bar=False, convert_to_tensor=False
                 )
+                logger.info(f"🔍 [STAGE] ENCODING_JOBS_COMPLETE | time={time.time()-encode_start:.3f}s | shape={getattr(job_embeddings, 'shape', 'N/A')}")
                 logger.info(f"🔍 [DIAG] Job embeddings created in {time.time() - encode_start:.3f} seconds, shape={getattr(job_embeddings, 'shape', 'N/A')}")
 
+                logger.info(f"🔍 [STAGE] ENCODING_QUERY_START")
                 logger.info(f"🔍 [DIAG] About to encode query with model.encode()...")
                 query_encode_start = time.time()
                 query_embedding = model.encode(
                     [query], show_progress_bar=False, convert_to_tensor=False
                 )
+                logger.info(f"🔍 [STAGE] ENCODING_QUERY_COMPLETE | time={time.time()-query_encode_start:.3f}s")
                 logger.info(f"🔍 [DIAG] Query embedding created in {time.time() - query_encode_start:.3f} seconds, shape={getattr(query_embedding, 'shape', 'N/A')}")
                 
                 memory_after_encoding = get_memory_usage()
@@ -2754,6 +2760,11 @@ def scrape_linkedin_with_adaptive_jobbert(
     """Adaptive JobBERT filtering with memory management (thread-safe)."""
     import gc
     import time
+
+    # Track function start for hang detection
+    function_start = time.time()
+    logger.info(f"🔍 [STAGE] SCRAPE_START | user={user_id} | keyword='{keyword}' | location='{location}'")
+
     all_scraped_jobs = []
     seen_job_ids = set()
     seen_canonical_pairs = set()
@@ -2769,6 +2780,8 @@ def scrape_linkedin_with_adaptive_jobbert(
                   "application/signed-exchange;v=b3;q=0.9",
         "Connection": "keep-alive",
     }
+
+    logger.info(f"🔍 [STAGE] LINKEDIN_SCRAPE_INIT | elapsed={time.time()-function_start:.2f}s")
 
     filter_params = "".join(
         [f"&{key}={quote_plus(value)}"
@@ -2810,11 +2823,14 @@ def scrape_linkedin_with_adaptive_jobbert(
             )
 
         try:
+            logger.info(f"🔍 [STAGE] LINKEDIN_REQUEST_START | page={page_number+1} | elapsed={time.time()-function_start:.2f}s")
             time.sleep(1.5)
             response = requests.get(url, headers=headers, timeout=10)
             response.raise_for_status()
+            logger.info(f"🔍 [STAGE] LINKEDIN_RESPONSE_OK | page={page_number+1} | status={response.status_code} | elapsed={time.time()-function_start:.2f}s")
             soup = BeautifulSoup(response.content, "lxml")
             job_cards = soup.find_all("div", class_="base-card")
+            logger.info(f"🔍 [STAGE] LINKEDIN_PARSE_COMPLETE | page={page_number+1} | jobs_found={len(job_cards)} | elapsed={time.time()-function_start:.2f}s")
 
             if not job_cards:
                 logger.info(
@@ -2885,11 +2901,10 @@ def scrape_linkedin_with_adaptive_jobbert(
             logger.error(f"Request failed for url {url}: {e}")
             break
 
-    logger.info(
-        f"🏁 Scraping complete: {len(all_scraped_jobs)} total jobs found."
-    )
+    logger.info(f"🔍 [STAGE] LINKEDIN_SCRAPE_COMPLETE | jobs={len(all_scraped_jobs)} | elapsed={time.time()-function_start:.2f}s")
 
     if not all_scraped_jobs:
+        logger.info(f"🔍 [STAGE] SCRAPE_END_NO_JOBS | elapsed={time.time()-function_start:.2f}s")
         return []
 
     if progress_msg:
@@ -2901,9 +2916,11 @@ def scrape_linkedin_with_adaptive_jobbert(
             ParseMode.MARKDOWN
         )
 
+    logger.info(f"🔍 [STAGE] AI_FILTERING_START | elapsed={time.time()-function_start:.2f}s")
     logger.info(f"🔍 [DIAG] About to call get_adaptive_matcher()...")
     matcher_start = time.time()
     adaptive_matcher = get_adaptive_matcher()
+    logger.info(f"🔍 [STAGE] MATCHER_LOADED | time={time.time()-matcher_start:.3f}s | elapsed={time.time()-function_start:.2f}s")
     logger.info(f"🔍 [DIAG] get_adaptive_matcher() returned in {time.time() - matcher_start:.3f} seconds, matcher={'valid' if adaptive_matcher else 'None'}")
 
     logger.info(f"🔍 FILTER DEBUG: Starting analysis of query '{keyword}'")
@@ -3021,6 +3038,7 @@ def scrape_linkedin_with_adaptive_jobbert(
         )
         safe_progress_update(progress_msg, completion_text, ParseMode.MARKDOWN)
 
+    logger.info(f"🔍 [STAGE] SORTING_RESULTS | jobs={len(final_jobs)} | elapsed={time.time()-function_start:.2f}s")
     final_jobs = sorted(
         final_jobs,
         key=lambda x: (
@@ -3032,6 +3050,7 @@ def scrape_linkedin_with_adaptive_jobbert(
 
     # Clean up memory after processing
     gc.collect()
+    logger.info(f"🔍 [STAGE] SCRAPE_END_SUCCESS | total_jobs={len(final_jobs)} | total_time={time.time()-function_start:.2f}s")
     return final_jobs
 
 
