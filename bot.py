@@ -257,6 +257,9 @@ warnings.filterwarnings(
 # Load environment variables
 load_dotenv()
 
+# Admin configuration
+ADMIN_USER_ID = 7744296624  # Your Telegram user ID
+
 
 # --- Text and Link Canonicalization Functions ---
 def canonical_link(url: str) -> str:
@@ -903,6 +906,129 @@ def about(update: Update, context: CallbackContext):
         ),
     )
     return MAIN_MENU
+
+
+# --- Admin Commands ---
+def admin_stats(update: Update, context: CallbackContext):
+    """Admin command to view bot statistics"""
+    user_id = update.effective_user.id
+
+    # Check if user is admin
+    if user_id != ADMIN_USER_ID:
+        update.message.reply_text("⛔ This command is only available to the bot administrator.")
+        return
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Get total unique users
+        cursor.execute("SELECT COUNT(DISTINCT chat_id) FROM alerts")
+        total_users = cursor.fetchone()[0]
+
+        # Get total active alerts
+        cursor.execute("SELECT COUNT(*) FROM alerts WHERE is_active = 1")
+        active_alerts = cursor.fetchone()[0]
+
+        # Get total paused alerts
+        cursor.execute("SELECT COUNT(*) FROM alerts WHERE is_active = 0")
+        paused_alerts = cursor.fetchone()[0]
+
+        # Get alerts created in last 24 hours
+        cursor.execute("""
+            SELECT COUNT(*) FROM alerts
+            WHERE datetime(created_at) > datetime('now', '-1 day')
+        """)
+        new_alerts_24h = cursor.fetchone()[0]
+
+        # Get alerts created in last 7 days
+        cursor.execute("""
+            SELECT COUNT(*) FROM alerts
+            WHERE datetime(created_at) > datetime('now', '-7 days')
+        """)
+        new_alerts_7d = cursor.fetchone()[0]
+
+        # Get total jobs sent
+        cursor.execute("SELECT COUNT(*) FROM sent_jobs")
+        total_jobs_sent = cursor.fetchone()[0]
+
+        # Get jobs sent in last 24 hours
+        cursor.execute("""
+            SELECT COUNT(*) FROM sent_jobs
+            WHERE datetime(sent_at) > datetime('now', '-1 day')
+        """)
+        jobs_sent_24h = cursor.fetchone()[0]
+
+        # Get most popular search keywords (top 5)
+        cursor.execute("""
+            SELECT keywords, COUNT(*) as count
+            FROM alerts
+            GROUP BY keywords
+            ORDER BY count DESC
+            LIMIT 5
+        """)
+        popular_keywords = cursor.fetchall()
+
+        # Get most popular locations (top 5)
+        cursor.execute("""
+            SELECT location, COUNT(*) as count
+            FROM alerts
+            GROUP BY location
+            ORDER BY count DESC
+            LIMIT 5
+        """)
+        popular_locations = cursor.fetchall()
+
+        # Get system resources
+        resources = get_system_resources()
+
+        conn.close()
+
+        # Format the statistics message
+        stats_msg = f"""📊 **Bot Statistics**
+
+👥 **Users & Alerts**
+• Total Users: {total_users}
+• Active Alerts: {active_alerts}
+• Paused Alerts: {paused_alerts}
+• Total Alerts: {active_alerts + paused_alerts}
+
+📈 **Growth**
+• New Alerts (24h): {new_alerts_24h}
+• New Alerts (7d): {new_alerts_7d}
+
+💼 **Job Notifications**
+• Total Jobs Sent: {total_jobs_sent}
+• Jobs Sent (24h): {jobs_sent_24h}
+
+🔍 **Popular Keywords**
+"""
+
+        for i, (keyword, count) in enumerate(popular_keywords, 1):
+            stats_msg += f"{i}. {keyword} ({count} alerts)\n"
+
+        stats_msg += "\n🌍 **Popular Locations**\n"
+        for i, (location, count) in enumerate(popular_locations, 1):
+            stats_msg += f"{i}. {location} ({count} alerts)\n"
+
+        stats_msg += f"""
+💾 **System Resources**
+• Memory: {resources.get('mem_mb', 0):.1f} MB ({resources.get('mem_pct', 0):.1f}%)
+• CPU: {resources.get('cpu_pct', 0):.1f}%
+• Threads: {resources.get('threads', 0)}
+• System Memory Available: {resources.get('sys_mem_avail_mb', 0):.1f} MB
+
+🤖 **Model Status**
+• JobBERT Loaded: {'Yes' if _global_jobbert_model else 'No'}
+• Model Usage Count: {_model_usage_count}
+"""
+
+        update.message.reply_text(stats_msg, parse_mode=ParseMode.MARKDOWN)
+        logger.info(f"Admin stats viewed by user {user_id}")
+
+    except Exception as e:
+        logger.error(f"Failed to generate admin stats: {e}", exc_info=True)
+        update.message.reply_text(f"❌ Error generating statistics: {e}")
 
 
 # --- Search and Preferences Flow ---
@@ -5237,6 +5363,10 @@ def main():
         allow_reentry=True,
     )
     dispatcher.add_handler(conv_handler)
+
+    # Add admin command handlers
+    dispatcher.add_handler(CommandHandler("stats", admin_stats))
+
     logger.info("Bot started polling...")
     try:
         updater.start_polling(timeout=30, read_latency=2)
