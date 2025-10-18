@@ -1732,14 +1732,70 @@ def get_detailed_memory_info():
             'error': str(e)
         }
 
+def get_system_resources():
+    """Get comprehensive system resource snapshot for debugging hangs"""
+    try:
+        import psutil
+        import os
+        import threading
+
+        process = psutil.Process(os.getpid())
+
+        # Memory info
+        mem_info = process.memory_info()
+        system_mem = psutil.virtual_memory()
+
+        # CPU info
+        cpu_percent = process.cpu_percent(interval=0.1)
+        system_cpu = psutil.cpu_percent(interval=0.1)
+
+        # Thread info
+        thread_count = process.num_threads()
+        active_threads = threading.active_count()
+
+        # Disk I/O
+        try:
+            io_counters = process.io_counters()
+            disk_read_mb = io_counters.read_bytes / 1024 / 1024
+            disk_write_mb = io_counters.write_bytes / 1024 / 1024
+        except:
+            disk_read_mb = 0
+            disk_write_mb = 0
+
+        # Network (if available)
+        try:
+            net_io = psutil.net_io_counters()
+            net_sent_mb = net_io.bytes_sent / 1024 / 1024
+            net_recv_mb = net_io.bytes_recv / 1024 / 1024
+        except:
+            net_sent_mb = 0
+            net_recv_mb = 0
+
+        return {
+            'mem_mb': mem_info.rss / 1024 / 1024,
+            'mem_pct': process.memory_percent(),
+            'sys_mem_avail_mb': system_mem.available / 1024 / 1024,
+            'sys_mem_pct': system_mem.percent,
+            'cpu_pct': cpu_percent,
+            'sys_cpu_pct': system_cpu,
+            'threads': thread_count,
+            'active_threads': active_threads,
+            'disk_read_mb': disk_read_mb,
+            'disk_write_mb': disk_write_mb,
+            'net_sent_mb': net_sent_mb,
+            'net_recv_mb': net_recv_mb,
+        }
+    except Exception as e:
+        return {'mem_mb': get_memory_usage(), 'error': str(e)}
+
 def check_memory_health():
     """Check memory health and return status with recommendations"""
     memory_info = get_detailed_memory_info()
     current_memory = memory_info.get('process_rss_mb', 0)
-    
+
     status = "HEALTHY"
     recommendations = []
-    
+
     # Check process memory usage
     if current_memory > MAX_MEMORY_MB * 0.9:
         status = "CRITICAL"
@@ -1902,14 +1958,18 @@ def get_jobbert_model():
                     logger.info(f"🔍 [DIAG] Memory cleanup completed in {time.time() - cleanup_start:.3f} seconds")
 
                 logger.info("🤖 Loading JobBERT-v2 model (this may take a moment)...")
+                resources_before_model = get_system_resources()
                 logger.info(f"🔍 [STAGE] MODEL_LOAD_START | model=JobBERT-v2")
+                logger.info(f"🔍 [RESOURCE] BEFORE_MODEL | mem={resources_before_model['mem_mb']:.1f}MB | cpu={resources_before_model['cpu_pct']:.1f}% | sys_mem_avail={resources_before_model['sys_mem_avail_mb']:.1f}MB | disk_read={resources_before_model['disk_read_mb']:.1f}MB")
                 logger.info(f"🔍 [DIAG] About to call SentenceTransformer('TechWolf/JobBERT-v2')...")
                 model_load_start = time.time()
 
                 _global_jobbert_model = SentenceTransformer("TechWolf/JobBERT-v2")
 
                 model_load_end = time.time()
+                resources_after_model = get_system_resources()
                 logger.info(f"🔍 [STAGE] MODEL_LOAD_COMPLETE | model=JobBERT-v2 | time={model_load_end - model_load_start:.3f}s")
+                logger.info(f"🔍 [RESOURCE] AFTER_MODEL | mem={resources_after_model['mem_mb']:.1f}MB (+{resources_after_model['mem_mb']-resources_before_model['mem_mb']:.1f}) | cpu={resources_after_model['cpu_pct']:.1f}% | disk_read={resources_after_model['disk_read_mb']:.1f}MB (+{resources_after_model['disk_read_mb']-resources_before_model['disk_read_mb']:.1f})")
                 logger.info(f"✅ JobBERT-v2 loaded successfully in {model_load_end - model_load_start:.3f} seconds")
                 logger.info(f"🔍 [DIAG] Model loaded successfully, type: {type(_global_jobbert_model)}")
 
@@ -2030,13 +2090,17 @@ class AdaptiveJobBERTMatcher:
                     logger.info(f"🔍 [DIAG] High memory detected, running cleanup...")
                     force_memory_cleanup()
 
+                resources_before_encode = get_system_resources()
                 logger.info(f"🔍 [STAGE] ENCODING_JOBS_START | jobs={len(job_texts)}")
+                logger.info(f"🔍 [RESOURCE] BEFORE_ENCODE | mem={resources_before_encode['mem_mb']:.1f}MB | cpu={resources_before_encode['cpu_pct']:.1f}% | threads={resources_before_encode['threads']}")
                 logger.info(f"🔍 [DIAG] About to encode {len(job_texts)} job texts with model.encode()...")
                 encode_start = time.time()
                 job_embeddings = model.encode(
                     job_texts, show_progress_bar=False, convert_to_tensor=False
                 )
+                resources_after_encode = get_system_resources()
                 logger.info(f"🔍 [STAGE] ENCODING_JOBS_COMPLETE | time={time.time()-encode_start:.3f}s | shape={getattr(job_embeddings, 'shape', 'N/A')}")
+                logger.info(f"🔍 [RESOURCE] AFTER_ENCODE | mem={resources_after_encode['mem_mb']:.1f}MB (+{resources_after_encode['mem_mb']-resources_before_encode['mem_mb']:.1f}) | cpu={resources_after_encode['cpu_pct']:.1f}%")
                 logger.info(f"🔍 [DIAG] Job embeddings created in {time.time() - encode_start:.3f} seconds, shape={getattr(job_embeddings, 'shape', 'N/A')}")
 
                 logger.info(f"🔍 [STAGE] ENCODING_QUERY_START")
@@ -2763,7 +2827,9 @@ def scrape_linkedin_with_adaptive_jobbert(
 
     # Track function start for hang detection
     function_start = time.time()
+    resources_start = get_system_resources()
     logger.info(f"🔍 [STAGE] SCRAPE_START | user={user_id} | keyword='{keyword}' | location='{location}'")
+    logger.info(f"🔍 [RESOURCE] mem={resources_start['mem_mb']:.1f}MB | cpu={resources_start['cpu_pct']:.1f}% | threads={resources_start['threads']} | sys_mem_avail={resources_start['sys_mem_avail_mb']:.1f}MB")
 
     all_scraped_jobs = []
     seen_job_ids = set()
@@ -2823,11 +2889,17 @@ def scrape_linkedin_with_adaptive_jobbert(
             )
 
         try:
+            resources_before_request = get_system_resources()
             logger.info(f"🔍 [STAGE] LINKEDIN_REQUEST_START | page={page_number+1} | elapsed={time.time()-function_start:.2f}s")
+            logger.info(f"🔍 [RESOURCE] BEFORE_REQUEST | net_sent={resources_before_request['net_sent_mb']:.1f}MB | net_recv={resources_before_request['net_recv_mb']:.1f}MB")
             time.sleep(1.5)
+            request_start_time = time.time()
             response = requests.get(url, headers=headers, timeout=10)
+            request_duration = time.time() - request_start_time
             response.raise_for_status()
-            logger.info(f"🔍 [STAGE] LINKEDIN_RESPONSE_OK | page={page_number+1} | status={response.status_code} | elapsed={time.time()-function_start:.2f}s")
+            resources_after_request = get_system_resources()
+            logger.info(f"🔍 [STAGE] LINKEDIN_RESPONSE_OK | page={page_number+1} | status={response.status_code} | request_time={request_duration:.2f}s | elapsed={time.time()-function_start:.2f}s")
+            logger.info(f"🔍 [RESOURCE] AFTER_REQUEST | net_recv_delta={resources_after_request['net_recv_mb']-resources_before_request['net_recv_mb']:.2f}MB | response_size={len(response.content)/1024:.1f}KB")
             soup = BeautifulSoup(response.content, "lxml")
             job_cards = soup.find_all("div", class_="base-card")
             logger.info(f"🔍 [STAGE] LINKEDIN_PARSE_COMPLETE | page={page_number+1} | jobs_found={len(job_cards)} | elapsed={time.time()-function_start:.2f}s")
