@@ -1,4 +1,4 @@
-# Updated dependencies for security - all vulnerabilities addressed
+# Dependencies - python-telegram-bot 13.15 requires tornado 6.1
 APScheduler==3.6.3
 beautifulsoup4==4.13.5
 cachetools==4.2.2
@@ -13,7 +13,7 @@ pytz==2025.2
 requests==2.32.4
 six==1.17.0
 soupsieve==2.8
-tornado==6.5
+tornado==6.1
 tzlocal==5.3.1
 urllib3==2.5.0
 scikit-learn==1.7.1
