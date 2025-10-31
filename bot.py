@@ -360,8 +360,8 @@ def safe_edit_message(
     EXPERIENCE_MENU, JOB_TYPE_MENU, DATE_POSTED_MENU, WORKPLACE_MENU, Browse,
     ALERTS_MENU, MY_ALERTS, ADD_ALERT_KEYWORD, ADD_ALERT_LOCATION,
     ALERT_PREFERENCES, EDIT_ALERT_PREFERENCES, SET_TIMEZONE, GET_KEYWORD,
-    GET_LOCATION,
-) = range(18)
+    GET_LOCATION, SAVED_JOBS,
+) = range(19)
 
 JOBS_PER_PAGE = 5
 MAX_SCRAPE_PAGES = 5
@@ -706,6 +706,7 @@ def make_main_menu(context: CallbackContext) -> (str, InlineKeyboardMarkup):
     keyboard = [
         [InlineKeyboardButton("🚀 Start Search", callback_data="start_search")],
         [InlineKeyboardButton("🔔 Set Alert", callback_data="set_alert")],
+        [InlineKeyboardButton("💾 Saved Jobs", callback_data="saved_jobs")],
         [InlineKeyboardButton("📋 Preferences", callback_data="prefs")],
     ]
     return text, InlineKeyboardMarkup(keyboard)
@@ -906,6 +907,230 @@ def about(update: Update, context: CallbackContext):
         ),
     )
     return MAIN_MENU
+
+
+# --- Saved Jobs Functions ---
+def saved_jobs_menu(update: Update, context: CallbackContext):
+    """Display user's saved jobs with pagination."""
+    query = update.callback_query
+    safe_answer_callback_query(query)
+
+    chat_id = query.from_user.id
+    page = context.user_data.get("saved_jobs_page", 0)
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # Get total count
+    total_count = cursor.execute(
+        "SELECT COUNT(*) FROM saved_jobs WHERE chat_id = ?", (chat_id,)
+    ).fetchone()[0]
+
+    # Get saved jobs for current page
+    offset = page * JOBS_PER_PAGE
+    saved_jobs = cursor.execute(
+        """SELECT job_title, company, location, date_posted, job_link,
+           alert_keywords, alert_location, saved_at
+           FROM saved_jobs
+           WHERE chat_id = ?
+           ORDER BY saved_at DESC
+           LIMIT ? OFFSET ?""",
+        (chat_id, JOBS_PER_PAGE, offset)
+    ).fetchall()
+    conn.close()
+
+    if total_count == 0:
+        text = "💾 *Saved Jobs*\n\nYou haven't saved any jobs yet.\n\n" \
+               "Click the 💾 Save button on job alerts to save them here!"
+        keyboard = [[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="main_menu")]]
+
+        try:
+            query.edit_message_text(
+                text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except telegram.error.BadRequest as e:
+            if "message is not modified" not in str(e).lower():
+                raise e
+        return SAVED_JOBS
+
+    # Build message with saved jobs
+    total_pages = (total_count + JOBS_PER_PAGE - 1) // JOBS_PER_PAGE
+    text = f"💾 *Saved Jobs* ({total_count} total)\n\n" \
+           f"📄 Page {page + 1} of {total_pages}\n\n"
+
+    for idx, job in enumerate(saved_jobs, 1):
+        job_num = offset + idx
+        title = html.escape(job[0])
+        company = html.escape(job[1])
+        location = html.escape(job[2] or "N/A")
+        date_posted = html.escape(job[3] or "N/A")
+        saved_at = job[7]
+
+        text += f"{job_num}. *{title}*\n"
+        text += f"   🏢 {company}\n"
+        text += f"   📍 {location}\n"
+        text += f"   📅 Posted: {date_posted}\n"
+        text += f"   💾 Saved: {saved_at[:10]}\n\n"
+
+    # Build keyboard with job links and navigation
+    keyboard = []
+    for idx, job in enumerate(saved_jobs):
+        job_num = offset + idx + 1
+        job_link = job[4]
+        keyboard.append([
+            InlineKeyboardButton(
+                f"View Job {job_num}", url=job_link
+            ),
+            InlineKeyboardButton(
+                f"🗑️ {job_num}", callback_data=f"unsave_job_{chat_id}_{canonical_link(job_link)}"
+            )
+        ])
+
+    # Navigation buttons
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(
+            InlineKeyboardButton("⬅️ Previous", callback_data="saved_jobs_prev")
+        )
+    if page < total_pages - 1:
+        nav_buttons.append(
+            InlineKeyboardButton("➡️ Next", callback_data="saved_jobs_next")
+        )
+
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+
+    keyboard.append([
+        InlineKeyboardButton("🔙 Back to Main Menu", callback_data="main_menu")
+    ])
+
+    try:
+        query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except telegram.error.BadRequest as e:
+        if "message is not modified" not in str(e).lower():
+            raise e
+
+    return SAVED_JOBS
+
+
+def save_job_callback(update: Update, context: CallbackContext):
+    """Handle saving a job from an alert."""
+    query = update.callback_query
+    query.answer("💾 Saving job...")
+
+    chat_id = query.from_user.id
+
+    # Parse callback data: save_job_<alert_id>_<job_id>
+    parts = query.data.split("_", 3)
+    if len(parts) < 4:
+        query.answer("❌ Error saving job")
+        return
+
+    alert_id = parts[2]
+    job_id = parts[3]
+
+    # Get job details from cache
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    job_data = cursor.execute(
+        """SELECT job_link, job_title, company, location, date_posted
+           FROM job_details_cache
+           WHERE alert_id = ? AND job_id = ?""",
+        (alert_id, job_id)
+    ).fetchone()
+
+    if not job_data:
+        conn.close()
+        query.answer("❌ Job not found")
+        return
+
+    # Get alert details
+    alert_data = cursor.execute(
+        """SELECT keywords, location
+           FROM alerts
+           WHERE id = ?""",
+        (alert_id,)
+    ).fetchone()
+
+    # Try to save the job
+    try:
+        cursor.execute(
+            """INSERT INTO saved_jobs
+               (chat_id, job_link, job_title, company, location, date_posted,
+                alert_keywords, alert_location)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (chat_id, job_data[0], job_data[1], job_data[2],
+             job_data[3], job_data[4],
+             alert_data[0] if alert_data else None,
+             alert_data[1] if alert_data else None)
+        )
+        conn.commit()
+        conn.close()
+        query.answer("✅ Job saved!")
+    except sqlite3.IntegrityError:
+        conn.close()
+        query.answer("ℹ️ Job already saved")
+    except Exception as e:
+        conn.close()
+        logger.error(f"Error saving job: {e}")
+        query.answer("❌ Error saving job")
+
+
+def unsave_job_callback(update: Update, context: CallbackContext):
+    """Handle removing a saved job."""
+    query = update.callback_query
+    query.answer("🗑️ Removing job...")
+
+    # Parse callback data: unsave_job_<chat_id>_<job_link_id>
+    parts = query.data.split("_", 3)
+    if len(parts) < 4:
+        query.answer("❌ Error removing job")
+        return
+
+    chat_id = int(parts[2])
+    job_link_id = parts[3]
+
+    # Delete the saved job
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """DELETE FROM saved_jobs
+           WHERE chat_id = ? AND job_link LIKE ?""",
+        (chat_id, f"%{job_link_id}%")
+    )
+    conn.commit()
+    conn.close()
+
+    query.answer("✅ Job removed from saved jobs")
+
+    # Refresh the saved jobs view
+    saved_jobs_menu(update, context)
+
+    return SAVED_JOBS
+
+
+def saved_jobs_navigation(update: Update, context: CallbackContext):
+    """Handle pagination for saved jobs."""
+    query = update.callback_query
+    query.answer()
+
+    current_page = context.user_data.get("saved_jobs_page", 0)
+
+    if query.data == "saved_jobs_next":
+        context.user_data["saved_jobs_page"] = current_page + 1
+    elif query.data == "saved_jobs_prev":
+        context.user_data["saved_jobs_page"] = max(0, current_page - 1)
+
+    saved_jobs_menu(update, context)
+    return SAVED_JOBS
 
 
 # --- Admin Commands ---
@@ -4753,14 +4978,20 @@ def check_single_alert(alert, bot: Bot):
                 f"From your alert for: <b>{keywords}</b> in "
                 f"<b>{alert_location}</b>"
             )
+            # Create a unique job identifier for this alert
+            job_unique_id = f"{alert['id']}_{job['_job_id']}"
+
             keyboard = [
                 [
                     InlineKeyboardButton("View Job", url=job["Link"]),
                     InlineKeyboardButton(
-                        "📋 My Alerts", callback_data="my_alerts"
+                        "💾 Save", callback_data=f"save_job_{job_unique_id}"
                     )
                 ],
                 [
+                    InlineKeyboardButton(
+                        "📋 My Alerts", callback_data="my_alerts"
+                    ),
                     InlineKeyboardButton("🏠 Start", callback_data="start_command")
                 ]
             ]
@@ -4804,6 +5035,22 @@ def check_single_alert(alert, bot: Bot):
                 "Sent and recorded %s new job(s) for alert ID %s.",
                 len(new_jobs_to_insert_db), alert["id"]
             )
+
+        # Cache job details for saving later
+        job_cache_data = []
+        for job in jobs_to_send:
+            job_cache_data.append((
+                alert["id"], job["_job_id"], job["Link"], job["Title"],
+                job["Company"], job["Location"], job["Date Posted"]
+            ))
+
+        if job_cache_data:
+            cursor.executemany("""
+                INSERT OR REPLACE INTO job_details_cache
+                (alert_id, job_id, job_link, job_title, company, location,
+                 date_posted, cached_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, job_cache_data)
 
         cursor.execute(
             "UPDATE alerts SET last_checked = CURRENT_TIMESTAMP WHERE id = ?",
@@ -5181,6 +5428,7 @@ def main():
                                      pattern="^start_search$"),
                 CallbackQueryHandler(alerts_menu, pattern="^set_alert$"),
                 CallbackQueryHandler(my_alerts, pattern="^my_alerts$"),
+                CallbackQueryHandler(saved_jobs_menu, pattern="^saved_jobs$"),
                 CallbackQueryHandler(start_from_callback, pattern="^start_command$"),
             ],
             PREFERENCES_MENU: [
@@ -5357,9 +5605,17 @@ def main():
                                      pattern="^edit_alert_save_final$"),
                 CallbackQueryHandler(my_alerts, pattern="^my_alerts$"),
             ],
+            SAVED_JOBS: [
+                CallbackQueryHandler(saved_jobs_navigation, pattern="^saved_jobs_(next|prev)$"),
+                CallbackQueryHandler(unsave_job_callback, pattern="^unsave_job_"),
+                CallbackQueryHandler(save_job_callback, pattern="^save_job_"),
+                CallbackQueryHandler(main_menu, pattern="^main_menu$"),
+                CallbackQueryHandler(start_from_callback, pattern="^start_command$"),
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel),
-                   CommandHandler("start", start)],
+                   CommandHandler("start", start),
+                   CallbackQueryHandler(save_job_callback, pattern="^save_job_")],
         allow_reentry=True,
     )
     dispatcher.add_handler(conv_handler)
