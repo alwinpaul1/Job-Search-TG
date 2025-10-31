@@ -2,6 +2,14 @@
 
 A powerful Telegram bot for intelligent job searching and automated job alerts using LinkedIn scraping and AI-powered relevance scoring.
 
+## Try It Now!
+
+The bot is live on Telegram! Start using it immediately without any setup:
+
+**[@JobQuestTG_Bot](https://t.me/JobQuestTG_Bot)**
+
+Just click the link or search for `@JobQuestTG_Bot` in Telegram and send `/start` to begin your job search journey!
+
 ## Features
 
 ### Smart Job Search
