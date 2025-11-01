@@ -930,7 +930,7 @@ def saved_jobs_menu(update: Update, context: CallbackContext):
     # Get saved jobs for current page
     offset = page * JOBS_PER_PAGE
     saved_jobs = cursor.execute(
-        """SELECT job_title, company, location, date_posted, job_link,
+        """SELECT id, job_title, company, location, date_posted, job_link,
            alert_keywords, alert_location, saved_at
            FROM saved_jobs
            WHERE chat_id = ?
@@ -963,11 +963,11 @@ def saved_jobs_menu(update: Update, context: CallbackContext):
 
     for idx, job in enumerate(saved_jobs, 1):
         job_num = offset + idx
-        title = html.escape(job[0])
-        company = html.escape(job[1])
-        location = html.escape(job[2] or "N/A")
-        date_posted = html.escape(job[3] or "N/A")
-        saved_at = job[7]
+        title = html.escape(job[1])
+        company = html.escape(job[2])
+        location = html.escape(job[3] or "N/A")
+        date_posted = html.escape(job[4] or "N/A")
+        saved_at = job[8]
 
         text += f"{job_num}. *{title}*\n"
         text += f"   🏢 {company}\n"
@@ -979,19 +979,15 @@ def saved_jobs_menu(update: Update, context: CallbackContext):
     keyboard = []
     for idx, job in enumerate(saved_jobs):
         job_num = offset + idx + 1
-        job_link = job[4]
-
-        # Use hash if canonical_link is too long for Telegram's 64-byte callback_data limit
-        job_link_id = canonical_link(job_link)
-        if len(job_link_id) > 40:  # Leave room for "unsave_job_" prefix and chat_id
-            job_link_id = hashlib.md5(job_link_id.encode()).hexdigest()[:16]
+        saved_job_id = job[0]  # Use the database ID
+        job_link = job[5]
 
         keyboard.append([
             InlineKeyboardButton(
                 f"View Job {job_num}", url=job_link
             ),
             InlineKeyboardButton(
-                f"🗑️ {job_num}", callback_data=f"unsave_job_{chat_id}_{job_link_id}"
+                f"🗑️ {job_num}", callback_data=f"unsave_job_{saved_job_id}"
             )
         ])
 
@@ -1095,23 +1091,25 @@ def unsave_job_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     query.answer("🗑️ Removing job...")
 
-    # Parse callback data: unsave_job_<chat_id>_<job_link_id>
-    parts = query.data.split("_", 3)
-    if len(parts) < 4:
+    # Parse callback data: unsave_job_<saved_job_id>
+    parts = query.data.split("_", 2)
+    if len(parts) < 3:
         query.answer("❌ Error removing job")
         return
 
-    chat_id = int(parts[2])
-    job_link_id = parts[3]
+    try:
+        saved_job_id = int(parts[2])
+    except ValueError:
+        query.answer("❌ Invalid job ID")
+        return
 
-    # Delete the saved job
+    # Delete the saved job by ID
     conn = get_db_connection()
     cursor = conn.cursor()
 
     cursor.execute(
-        """DELETE FROM saved_jobs
-           WHERE chat_id = ? AND job_link LIKE ?""",
-        (chat_id, f"%{job_link_id}%")
+        """DELETE FROM saved_jobs WHERE id = ?""",
+        (saved_job_id,)
     )
     conn.commit()
     conn.close()
