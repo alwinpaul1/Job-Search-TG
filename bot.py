@@ -980,12 +980,18 @@ def saved_jobs_menu(update: Update, context: CallbackContext):
     for idx, job in enumerate(saved_jobs):
         job_num = offset + idx + 1
         job_link = job[4]
+
+        # Use hash if canonical_link is too long for Telegram's 64-byte callback_data limit
+        job_link_id = canonical_link(job_link)
+        if len(job_link_id) > 40:  # Leave room for "unsave_job_" prefix and chat_id
+            job_link_id = hashlib.md5(job_link_id.encode()).hexdigest()[:16]
+
         keyboard.append([
             InlineKeyboardButton(
                 f"View Job {job_num}", url=job_link
             ),
             InlineKeyboardButton(
-                f"🗑️ {job_num}", callback_data=f"unsave_job_{chat_id}_{canonical_link(job_link)}"
+                f"🗑️ {job_num}", callback_data=f"unsave_job_{chat_id}_{job_link_id}"
             )
         ])
 
