@@ -1077,6 +1077,30 @@ def save_job_callback(update: Update, context: CallbackContext):
         conn.commit()
         conn.close()
         query.answer("✅ Job saved!")
+
+        # Update button to show "✅ Saved"
+        try:
+            # Get the job_unique_id from callback data
+            job_unique_id = f"{alert_id}_{job_id}"
+
+            # Update the message's inline keyboard
+            original_markup = query.message.reply_markup
+            new_keyboard = [
+                [
+                    InlineKeyboardButton("View Job", url=job_data[0]),
+                    InlineKeyboardButton(
+                        "✅ Saved", callback_data=f"unsave_from_alert_{job_unique_id}"
+                    )
+                ],
+                [
+                    InlineKeyboardButton("📋 My Alerts", callback_data="my_alerts"),
+                    InlineKeyboardButton("🏠 Start", callback_data="start_command")
+                ]
+            ]
+            query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(new_keyboard))
+        except Exception as e:
+            logger.error(f"Error updating button after save: {e}")
+
     except sqlite3.IntegrityError:
         conn.close()
         query.answer("ℹ️ Job already saved")
@@ -1086,8 +1110,69 @@ def save_job_callback(update: Update, context: CallbackContext):
         query.answer("❌ Error saving job")
 
 
+def unsave_from_alert_callback(update: Update, context: CallbackContext):
+    """Handle unsaving a job from an alert message."""
+    query = update.callback_query
+    query.answer("🗑️ Removing from saved jobs...")
+
+    chat_id = query.from_user.id
+
+    # Parse callback data: unsave_from_alert_<alert_id>_<job_id>
+    parts = query.data.split("_", 4)
+    if len(parts) < 5:
+        query.answer("❌ Error removing job")
+        return
+
+    alert_id = parts[3]
+    job_id = parts[4]
+
+    # Get job link from cache
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    job_data = cursor.execute(
+        """SELECT job_link FROM job_details_cache
+           WHERE alert_id = ? AND job_id = ?""",
+        (alert_id, job_id)
+    ).fetchone()
+
+    if not job_data:
+        conn.close()
+        query.answer("❌ Job not found")
+        return
+
+    # Delete the saved job
+    cursor.execute(
+        """DELETE FROM saved_jobs WHERE chat_id = ? AND job_link = ?""",
+        (chat_id, job_data[0])
+    )
+    conn.commit()
+    conn.close()
+
+    query.answer("✅ Removed from saved jobs")
+
+    # Update button to show "💾 Save"
+    try:
+        job_unique_id = f"{alert_id}_{job_id}"
+        new_keyboard = [
+            [
+                InlineKeyboardButton("View Job", url=job_data[0]),
+                InlineKeyboardButton(
+                    "💾 Save", callback_data=f"save_job_{job_unique_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton("📋 My Alerts", callback_data="my_alerts"),
+                InlineKeyboardButton("🏠 Start", callback_data="start_command")
+            ]
+        ]
+        query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(new_keyboard))
+    except Exception as e:
+        logger.error(f"Error updating button after unsave: {e}")
+
+
 def unsave_job_callback(update: Update, context: CallbackContext):
-    """Handle removing a saved job."""
+    """Handle removing a saved job from the saved jobs menu."""
     query = update.callback_query
     query.answer("🗑️ Removing job...")
 
@@ -4994,11 +5079,21 @@ def check_single_alert(alert, bot: Bot):
             # Store the mapping from hashed ID to original job_id for callback lookup
             job["_job_id_for_callback"] = job_id_for_callback
 
+            # Check if job is already saved
+            is_saved = cursor.execute(
+                "SELECT 1 FROM saved_jobs WHERE chat_id = ? AND job_link = ?",
+                (alert["chat_id"], job["Link"])
+            ).fetchone() is not None
+
+            # Show "✅ Saved" if already saved, otherwise "💾 Save"
+            save_button_text = "✅ Saved" if is_saved else "💾 Save"
+            save_callback_data = f"unsave_from_alert_{job_unique_id}" if is_saved else f"save_job_{job_unique_id}"
+
             keyboard = [
                 [
                     InlineKeyboardButton("View Job", url=job["Link"]),
                     InlineKeyboardButton(
-                        "💾 Save", callback_data=f"save_job_{job_unique_id}"
+                        save_button_text, callback_data=save_callback_data
                     )
                 ],
                 [
@@ -5628,7 +5723,8 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", cancel),
                    CommandHandler("start", start),
-                   CallbackQueryHandler(save_job_callback, pattern="^save_job_")],
+                   CallbackQueryHandler(save_job_callback, pattern="^save_job_"),
+                   CallbackQueryHandler(unsave_from_alert_callback, pattern="^unsave_from_alert_")],
         allow_reentry=True,
     )
     dispatcher.add_handler(conv_handler)
