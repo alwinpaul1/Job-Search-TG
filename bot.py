@@ -1,3 +1,4 @@
+import hashlib
 import html
 import json
 import logging
@@ -4979,7 +4980,15 @@ def check_single_alert(alert, bot: Bot):
                 f"<b>{alert_location}</b>"
             )
             # Create a unique job identifier for this alert
-            job_unique_id = f"{alert['id']}_{job['_job_id']}"
+            # Use hash if job_id is too long for Telegram's 64-byte callback_data limit
+            job_id_for_callback = job['_job_id']
+            if len(job_id_for_callback) > 40:  # Leave room for "save_job_" prefix and alert_id
+                job_id_for_callback = hashlib.md5(job_id_for_callback.encode()).hexdigest()[:16]
+
+            job_unique_id = f"{alert['id']}_{job_id_for_callback}"
+
+            # Store the mapping from hashed ID to original job_id for callback lookup
+            job["_job_id_for_callback"] = job_id_for_callback
 
             keyboard = [
                 [
@@ -5036,11 +5045,11 @@ def check_single_alert(alert, bot: Bot):
                 len(new_jobs_to_insert_db), alert["id"]
             )
 
-        # Cache job details for saving later
+        # Cache job details for saving later (using callback-safe job_id)
         job_cache_data = []
         for job in jobs_to_send:
             job_cache_data.append((
-                alert["id"], job["_job_id"], job["Link"], job["Title"],
+                alert["id"], job["_job_id_for_callback"], job["Link"], job["Title"],
                 job["Company"], job["Location"], job["Date Posted"]
             ))
 
