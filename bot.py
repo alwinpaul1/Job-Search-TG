@@ -185,13 +185,14 @@ heartbeat_active.set()  # Start with heartbeat active
 last_scheduler_run = {'alert_check': None, 'memory_cleanup': None}
 scheduler_watchdog_lock = threading.Lock()
 
-# Simple database connection pool
+# Simple database connection pool with dynamic sizing
 class DatabasePool:
     def __init__(self, max_connections=5):
         self.max_connections = max_connections
         self.pool = []
         self.pool_lock = threading.Lock()
         self.active_connections = 0
+        logger.info(f"📊 Database pool initialized with max_connections={max_connections}")
         
     def get_connection(self):
         """Get a connection from the pool or create a new one"""
@@ -251,8 +252,64 @@ class DatabasePool:
                     logger.warning(f"Error closing pooled connection: {e}")
             self.active_connections = 0
 
-# Global database pool
-db_pool = DatabasePool(max_connections=5)
+def calculate_optimal_pool_size():
+    """
+    Calculate optimal database connection pool size dynamically.
+    
+    Factors considered:
+    - Number of active alerts (if database is accessible)
+    - Environment variable override
+    - System constraints
+    - Reasonable defaults
+    
+    Returns:
+        int: Optimal pool size
+    """
+    # Check for environment variable override first
+    env_pool_size = os.getenv('DB_POOL_SIZE')
+    if env_pool_size:
+        try:
+            pool_size = int(env_pool_size)
+            if pool_size > 0:
+                logger.info(f"📊 Using DB_POOL_SIZE from environment: {pool_size}")
+                return pool_size
+            else:
+                logger.warning(f"⚠️ Invalid DB_POOL_SIZE in environment: {env_pool_size}, using dynamic calculation")
+        except ValueError:
+            logger.warning(f"⚠️ Invalid DB_POOL_SIZE in environment: {env_pool_size}, using dynamic calculation")
+    
+    # Default pool sizes
+    min_pool_size = 10  # Minimum for production use
+    default_fallback = 10  # Fallback if calculation fails
+    max_pool_size = 50  # Safety cap
+    
+    try:
+        # Try to query database for active alerts count
+        temp_conn = sqlite3.connect("job_alerts.db", timeout=5.0)
+        cursor = temp_conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM alerts WHERE is_active = 1")
+        active_alerts = cursor.fetchone()[0]
+        temp_conn.close()
+        
+        # Calculate pool size based on active alerts
+        # Formula: base_size + (active_alerts * concurrency_factor)
+        # Concurrency factor: 0.7 (assumes ~70% of alerts may run simultaneously)
+        base_size = 10
+        concurrency_factor = 0.7
+        calculated_size = int(base_size + (active_alerts * concurrency_factor))
+        
+        # Apply bounds
+        pool_size = max(min_pool_size, min(calculated_size, max_pool_size))
+        
+        logger.info(f"📊 Dynamic pool size calculation: {active_alerts} active alerts → {pool_size} connections")
+        return pool_size
+        
+    except Exception as e:
+        logger.warning(f"⚠️ Could not calculate dynamic pool size: {e}, using fallback default: {default_fallback}")
+        return default_fallback
+
+# Global database pool - dynamically sized based on active alerts
+db_pool = DatabasePool(max_connections=calculate_optimal_pool_size())
 
 # Signal handlers for graceful shutdown
 def signal_handler(signum, frame):
@@ -2734,7 +2791,12 @@ class AdaptiveJobBERTMatcher:
                 logger.warning(f"❌ JobBERT encoding failed: {e}")
                 return self._fallback_basic_filter(jobs, query)
 
-            # Step 2: Calculate semantic similarities
+            # Step 2: Check if we have embeddings before calculating similarities
+            if len(job_embeddings) == 0 or (hasattr(job_embeddings, 'shape') and job_embeddings.shape[0] == 0):
+                logger.info(f"ℹ️ No job embeddings to process (empty array after filtering). Returning 0 jobs.")
+                return []
+            
+            # Step 3: Calculate semantic similarities
             try:
                 similarities = cosine_similarity(
                     query_embedding, job_embeddings
@@ -2743,7 +2805,7 @@ class AdaptiveJobBERTMatcher:
                 logger.warning(f"❌ Similarity calculation failed: {e}")
                 return self._fallback_basic_filter(jobs, query)
 
-            # Step 3: Adaptive threshold based on query specificity
+            # Step 4: Adaptive threshold based on query specificity
             try:
                 threshold = self._calculate_adaptive_threshold(
                     query, similarities
@@ -2752,7 +2814,7 @@ class AdaptiveJobBERTMatcher:
                 logger.warning(f"❌ Threshold calculation failed: {e}")
                 threshold = 0.3  # Safe fallback threshold
 
-            # Step 4: Multi-factor scoring
+            # Step 5: Multi-factor scoring
             relevant_jobs = []
             for i, job in enumerate(jobs):
                 try:
