@@ -78,6 +78,9 @@ Just click the link or search for `@JobQuestTG_Bot` in Telegram and send `/start
    Create a `.env` file in the project root:
    ```env
    TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
+   
+   # Optional: Override database connection pool size (auto-calculated by default)
+   # DB_POOL_SIZE=20
    ```
 
 5. **Run the bot**
@@ -160,7 +163,14 @@ Just click the link or search for `@JobQuestTG_Bot` in Telegram and send `/start
 
 ### Environment Variables
 ```env
-TELEGRAM_TOKEN=your_bot_token
+# Required
+TELEGRAM_BOT_TOKEN=your_bot_token
+
+# Optional
+DB_POOL_SIZE=20  # Database connection pool size (auto-calculated if not set)
+                 # Formula: 10 + (active_alerts * 0.7)
+                 # Default: 10-50 connections based on active alerts
+                 # Fallback: 10 connections if calculation fails
 ```
 
 ### Database

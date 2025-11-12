@@ -19,8 +19,6 @@ job_alerts.db
 
 # Documentation files
 CLAUDE.md
-FIXES_APPLIED.md
-QUICK_START_GUIDE.md
 
 # Backup/alternative bot files
 bot1.py
