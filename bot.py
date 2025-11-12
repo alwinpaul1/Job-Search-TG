@@ -86,17 +86,91 @@ alert_logger.setLevel(logging.INFO)
 # Global thread pool for concurrent operations with proper cleanup
 executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="JobQuest")
 
-# Enhanced lock system for thread safety
-db_lock = threading.RLock()  # Reentrant lock for nested database operations
-search_ai_lock = threading.Lock()  # For user searches
-alert_ai_lock = threading.Lock()   # For background alert processing
-model_lock = threading.RLock()     # For model loading/unloading operations
-memory_cleanup_lock = threading.Lock()  # For memory cleanup operations
-scheduler_lock = threading.Lock()  # For scheduler operations
+# Enhanced lock system for thread safety with deadlock detection
+class DeadlockDetectableLock:
+    """Thread lock with deadlock detection and auto-recovery"""
+    def __init__(self, name="UnnamedLock", timeout=300):
+        self._lock = threading.RLock()
+        self._name = name
+        self._timeout = timeout
+        self._holder = None
+        self._holder_time = None
+        self._lock_count = 0
+        self._meta_lock = threading.Lock()
+        
+    def acquire(self, blocking=True, timeout=-1):
+        """Acquire lock with deadlock detection"""
+        if timeout == -1:
+            timeout = self._timeout
+            
+        acquired = self._lock.acquire(blocking=blocking, timeout=timeout)
+        
+        if acquired:
+            with self._meta_lock:
+                self._holder = threading.current_thread().name
+                self._holder_time = time.time()
+                self._lock_count += 1
+                logger.debug(f"🔒 Lock '{self._name}' acquired by {self._holder} (count: {self._lock_count})")
+        else:
+            with self._meta_lock:
+                if self._holder and self._holder_time:
+                    held_duration = time.time() - self._holder_time
+                    logger.warning(
+                        f"⚠️ Failed to acquire lock '{self._name}'. "
+                        f"Held by: {self._holder} for {held_duration:.1f}s"
+                    )
+        
+        return acquired
+    
+    def release(self):
+        """Release lock and update tracking"""
+        try:
+            with self._meta_lock:
+                self._lock_count -= 1
+                if self._lock_count <= 0:
+                    self._holder = None
+                    self._holder_time = None
+                    self._lock_count = 0
+                logger.debug(f"🔓 Lock '{self._name}' released (remaining count: {self._lock_count})")
+            self._lock.release()
+        except Exception as e:
+            logger.error(f"❌ Error releasing lock '{self._name}': {e}")
+    
+    def force_release(self):
+        """Force release in case of deadlock - use with extreme caution"""
+        logger.warning(f"🆘 FORCE RELEASING lock '{self._name}' - potential deadlock recovery")
+        with self._meta_lock:
+            old_holder = self._holder
+            self._holder = None
+            self._holder_time = None
+            self._lock_count = 0
+            logger.critical(f"🔓 Force released lock previously held by: {old_holder}")
+        # Create a new lock to ensure clean state
+        self._lock = threading.RLock()
+    
+    def get_status(self):
+        """Get current lock status for monitoring"""
+        with self._meta_lock:
+            if self._holder and self._holder_time:
+                return {
+                    'locked': True,
+                    'holder': self._holder,
+                    'held_duration': time.time() - self._holder_time,
+                    'lock_count': self._lock_count
+                }
+            return {'locked': False}
+
+# Enhanced lock system
+db_lock = threading.RLock()
+search_ai_lock = threading.Lock()
+alert_ai_lock = threading.Lock()
+model_lock = DeadlockDetectableLock("ModelLock", timeout=180)  # 3 min timeout
+memory_cleanup_lock = threading.Lock()
+scheduler_lock = threading.Lock()
 
 # Global state locks
-global_state_lock = threading.RLock()  # For global variable access
-heartbeat_lock = threading.Lock()      # For heartbeat mechanism
+global_state_lock = threading.RLock()
+heartbeat_lock = threading.Lock()
 
 # User-specific operation tracking
 user_operations = {}
@@ -106,6 +180,10 @@ user_operations_lock = threading.Lock()
 shutdown_requested = threading.Event()
 heartbeat_active = threading.Event()
 heartbeat_active.set()  # Start with heartbeat active
+
+# Scheduler watchdog tracking
+last_scheduler_run = {'alert_check': None, 'memory_cleanup': None}
+scheduler_watchdog_lock = threading.Lock()
 
 # Simple database connection pool
 class DatabasePool:
@@ -2290,21 +2368,56 @@ def force_memory_cleanup():
 
 
 def unload_jobbert_model():
-    """Unload the JobBERT model to free memory"""
+    """Unload the JobBERT model to free memory with enhanced error handling"""
     global _global_jobbert_model, _model_load_attempted, _model_last_used, _model_usage_count
     
-    with model_lock:
+    lock_acquired = False
+    try:
+        # Try to acquire lock with timeout
+        lock_acquired = model_lock.acquire(timeout=30)
+        
+        if not lock_acquired:
+            logger.error("⚠️ Failed to acquire model_lock for unloading - potential deadlock")
+            # Try force release if deadlocked
+            lock_status = model_lock.get_status()
+            if lock_status.get('locked') and lock_status.get('held_duration', 0) > 60:
+                logger.warning("🆘 Forcing lock release to unload model")
+                model_lock.force_release()
+                lock_acquired = model_lock.acquire(timeout=10)
+            
+            if not lock_acquired:
+                logger.error("❌ Cannot unload model - lock unavailable")
+                return
+        
         if _global_jobbert_model is not None:
             logger.info("🗑️ Unloading JobBERT model to free memory...")
-            del _global_jobbert_model
-            _global_jobbert_model = None
-            _model_load_attempted = False
-            _model_last_used = None
-            _model_usage_count = 0
+            try:
+                del _global_jobbert_model
+                _global_jobbert_model = None
+                _model_load_attempted = False
+                _model_last_used = None
+                _model_usage_count = 0
+                logger.info("✅ Model deleted from memory")
+            except Exception as del_error:
+                logger.error(f"❌ Error deleting model: {del_error}")
+                _global_jobbert_model = None  # Set to None anyway
             
-            with memory_cleanup_lock:
-                force_memory_cleanup()
-            logger.info(f"✅ JobBERT model unloaded. Memory usage: {get_memory_usage():.1f} MB")
+            try:
+                with memory_cleanup_lock:
+                    force_memory_cleanup()
+                logger.info(f"✅ JobBERT model unloaded. Memory usage: {get_memory_usage():.1f} MB")
+            except Exception as cleanup_error:
+                logger.error(f"⚠️ Cleanup after unload failed: {cleanup_error}")
+                
+    except Exception as e:
+        logger.error(f"❌ Error in unload_jobbert_model: {e}", exc_info=True)
+    finally:
+        # Always release the lock if we acquired it
+        if lock_acquired:
+            try:
+                model_lock.release()
+            except Exception as release_error:
+                logger.error(f"❌ Error releasing lock in unload: {release_error}")
 
 
 def should_unload_model():
@@ -2350,7 +2463,7 @@ def should_unload_model():
 
 
 def get_jobbert_model():
-    """Get or load the JobBERT model with intelligent memory management"""
+    """Get or load the JobBERT model with intelligent memory management and deadlock recovery"""
     global _global_jobbert_model, _model_load_attempted, _model_last_used, _model_usage_count
     import time
     import threading
@@ -2359,16 +2472,28 @@ def get_jobbert_model():
     logger.info(f"🔍 [DIAG] get_jobbert_model() called by thread: {current_thread}")
     logger.info(f"🔍 [DIAG] Current model state: _global_jobbert_model={'loaded' if _global_jobbert_model else 'None'}, _model_load_attempted={_model_load_attempted}")
 
+    # Check lock status before attempting to acquire
+    lock_status = model_lock.get_status()
+    if lock_status.get('locked') and lock_status.get('held_duration', 0) > 300:
+        logger.critical(f"🚨 DEADLOCK DETECTED: model_lock held by {lock_status['holder']} for {lock_status['held_duration']:.1f}s")
+        logger.critical(f"🆘 Attempting automatic deadlock recovery...")
+        try:
+            model_lock.force_release()
+            logger.info(f"✅ Deadlock recovery successful - lock forcibly released")
+        except Exception as e:
+            logger.error(f"❌ Deadlock recovery failed: {e}")
+            return None
+
     logger.info(f"🔍 [DIAG] Attempting to acquire model_lock...")
     lock_start_time = time.time()
 
     # Try to acquire lock with timeout and retry logic to prevent infinite hangs
-    max_retries = 3
+    max_retries = 2
     retry_count = 0
     lock_acquired = False
 
     while retry_count < max_retries and not lock_acquired:
-        lock_acquired = model_lock.acquire(timeout=60)  # 60 second timeout per attempt
+        lock_acquired = model_lock.acquire(timeout=90)  # 90 second timeout per attempt
 
         if not lock_acquired:
             retry_count += 1
@@ -2376,14 +2501,24 @@ def get_jobbert_model():
             logger.warning(f"⚠️ Failed to acquire model_lock (attempt {retry_count}/{max_retries}, elapsed={elapsed:.1f}s)")
 
             if retry_count < max_retries:
-                logger.info(f"🔄 Retrying lock acquisition in 5 seconds...")
-                time.sleep(5)
+                logger.info(f"🔄 Retrying lock acquisition in 3 seconds...")
+                time.sleep(3)
             else:
                 logger.error(f"🚨 [CRITICAL] Failed to acquire model_lock after {max_retries} attempts ({elapsed:.1f}s total)")
-                logger.error(f"🔍 [DIAG] Possible deadlock detected. This indicates another thread crashed while holding the lock.")
-                logger.error(f"💡 RECOMMENDATION: Restart the bot to clear the deadlock.")
-                # Return None - the calling code will handle this gracefully
-                return None
+                logger.error(f"🔍 [DIAG] Possible deadlock detected. Attempting force recovery...")
+                
+                # Last resort: force release the lock
+                try:
+                    model_lock.force_release()
+                    logger.warning(f"🆘 Lock forcibly released. Attempting final acquisition...")
+                    lock_acquired = model_lock.acquire(timeout=30)
+                    if not lock_acquired:
+                        logger.critical(f"❌ Final lock acquisition failed even after force release")
+                        return None
+                    logger.info(f"✅ Successfully acquired lock after force release")
+                except Exception as e:
+                    logger.critical(f"❌ Force release failed: {e}")
+                    return None
 
     try:
         lock_acquired_time = time.time()
@@ -5323,15 +5458,21 @@ def main():
     scheduler = BackgroundScheduler(timezone="UTC")
 
     def memory_aware_check_alerts(bot_instance):
-        """Memory-aware alert checking with adaptive intervals"""
+        """Memory-aware alert checking with adaptive intervals and watchdog tracking"""
         if shutdown_requested.is_set():
             logger.info("🛑 Shutdown requested, skipping alert check")
             return
-            
+        
+        start_time = time.time()
+        
         try:
             with scheduler_lock:
                 current_memory = get_memory_usage()
                 logger.info(f"🔍 Starting alert check cycle. Memory: {current_memory:.1f} MB")
+                
+                # Update watchdog - alert check started
+                with scheduler_watchdog_lock:
+                    last_scheduler_run['alert_check'] = time.time()
                 
                 # Skip if memory is too high
                 if current_memory > MAX_MEMORY_MB:
@@ -5341,7 +5482,16 @@ def main():
                     return
                 
                 # Run the actual alert check
-                check_all_alerts(bot_instance)
+                try:
+                    check_all_alerts(bot_instance)
+                    logger.info(f"✅ Alert check completed in {time.time() - start_time:.1f}s")
+                except Exception as check_error:
+                    logger.error(f"❌ Alert check failed: {check_error}", exc_info=True)
+                    # Try to recover from potential deadlocks
+                    lock_status = model_lock.get_status()
+                    if lock_status.get('locked') and lock_status.get('held_duration', 0) > 300:
+                        logger.critical(f"🚨 Detected stuck lock during alert check - forcing recovery")
+                        model_lock.force_release()
                 
                 # Cleanup after alert check
                 with memory_cleanup_lock:
@@ -5352,20 +5502,30 @@ def main():
                     unload_jobbert_model()
                     
         except Exception as e:
-            logger.error(f"Memory-aware alert check failed: {e}")
+            logger.error(f"❌ Memory-aware alert check failed: {e}", exc_info=True)
+            logger.error(f"🔍 Alert check failed after {time.time() - start_time:.1f}s")
             try:
                 with memory_cleanup_lock:
                     force_memory_cleanup()
+                # Attempt deadlock recovery
+                lock_status = model_lock.get_status()
+                if lock_status.get('locked'):
+                    logger.warning(f"⚠️ Lock still held after failure - attempting recovery")
+                    model_lock.force_release()
             except Exception as cleanup_e:
-                logger.error(f"Failed to cleanup after error: {cleanup_e}")
+                logger.error(f"❌ Failed to cleanup after error: {cleanup_e}")
 
     def periodic_memory_cleanup():
-        """Periodic memory cleanup job"""
+        """Periodic memory cleanup job with watchdog tracking"""
         if shutdown_requested.is_set():
             logger.info("🛑 Shutdown requested, skipping memory cleanup")
             return
-            
+        
         try:
+            # Update watchdog
+            with scheduler_watchdog_lock:
+                last_scheduler_run['memory_cleanup'] = time.time()
+            
             with memory_cleanup_lock:
                 current_memory = get_memory_usage()
                 logger.info(f"🧹 Periodic cleanup. Memory: {current_memory:.1f} MB")
@@ -5379,8 +5539,53 @@ def main():
                         unload_jobbert_model()
                         
         except Exception as e:
-            logger.error(f"Periodic cleanup failed: {e}")
+            logger.error(f"❌ Periodic cleanup failed: {e}", exc_info=True)
             # Don't retry cleanup here to avoid infinite loops
+    
+    def scheduler_watchdog():
+        """Monitor scheduler health and detect if jobs stop running"""
+        if shutdown_requested.is_set():
+            return
+        
+        try:
+            current_time = time.time()
+            
+            with scheduler_watchdog_lock:
+                alert_last_run = last_scheduler_run.get('alert_check')
+                cleanup_last_run = last_scheduler_run.get('memory_cleanup')
+            
+            # Check alert checker (should run every 30 minutes)
+            if alert_last_run:
+                time_since_alert = current_time - alert_last_run
+                if time_since_alert > 3600:  # 1 hour without running
+                    logger.critical(f"🚨 SCHEDULER ALERT: Alert checker hasn't run in {time_since_alert/60:.1f} minutes!")
+                    logger.critical(f"🔍 Last successful alert check: {time_since_alert/60:.1f} minutes ago")
+                    logger.critical(f"💡 This may indicate scheduler failure or deadlock")
+                    
+                    # Try to diagnose the issue
+                    lock_status = model_lock.get_status()
+                    if lock_status.get('locked'):
+                        logger.critical(f"🚨 Model lock is stuck! Held by: {lock_status['holder']} for {lock_status['held_duration']:.1f}s")
+                        logger.critical(f"🆘 Attempting automatic recovery...")
+                        try:
+                            model_lock.force_release()
+                            logger.info(f"✅ Lock forcibly released - scheduler should resume")
+                        except Exception as e:
+                            logger.critical(f"❌ Failed to release lock: {e}")
+                elif time_since_alert > 2400:  # 40 minutes warning
+                    logger.warning(f"⚠️ Alert checker delayed: {time_since_alert/60:.1f} minutes since last run")
+            
+            # Check memory cleanup (should run every 15 minutes)
+            if cleanup_last_run:
+                time_since_cleanup = current_time - cleanup_last_run
+                if time_since_cleanup > 1800:  # 30 minutes without running
+                    logger.warning(f"⚠️ Memory cleanup hasn't run in {time_since_cleanup/60:.1f} minutes")
+            
+            # Log scheduler health status
+            logger.info(f"🕐 Scheduler Watchdog: Alert check {time_since_alert/60:.1f}m ago, Cleanup {time_since_cleanup/60:.1f}m ago" if alert_last_run and cleanup_last_run else "🕐 Scheduler Watchdog: Waiting for first run")
+            
+        except Exception as e:
+            logger.error(f"❌ Scheduler watchdog failed: {e}", exc_info=True)
 
     def heartbeat_check():
         """Enhanced heartbeat mechanism with detailed health monitoring"""
@@ -5487,12 +5692,22 @@ def main():
             id="heartbeat_check"
         )
         
+        # Add scheduler watchdog every 10 minutes
+        scheduler.add_job(
+            scheduler_watchdog,
+            "interval",
+            minutes=10,
+            max_instances=1,
+            id="scheduler_watchdog"
+        )
+        
         scheduler.start()
         logger.info("🚀 Background scheduler started:")
         logger.info("   - Alert checks every 30 minutes (memory-aware)")
         logger.info("   - Memory cleanup every 15 minutes")
         logger.info("   - Heartbeat monitoring every 2 minutes")
         logger.info("   - Stuck operation cleanup every 5 minutes")
+        logger.info("   - Scheduler watchdog every 10 minutes")
         
     except Exception as e:
         logger.error(f"Failed to start scheduler: {e}")
