@@ -2264,7 +2264,7 @@ _model_usage_count = 0
 
 # Memory management constants
 MAX_MEMORY_MB = 2500  # Maximum memory before cleanup
-MODEL_IDLE_TIMEOUT = 1800  # 30 minutes of inactivity before unloading
+MODEL_IDLE_TIMEOUT = 600  # 10 minutes of inactivity before unloading (optimized for faster memory release)
 MAX_MODEL_USES = 200  # Unload model after this many uses to prevent memory fragmentation
 
 
