@@ -65,8 +65,8 @@ Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=HOME=/root
 
-# Watchdog - systemd will restart if service doesn't respond in 5 minutes
-WatchdogSec=300
+# Note: WatchdogSec removed - our wrapper script handles its own health monitoring
+# The wrapper does memory checks and log activity monitoring internally
 
 # Kill settings
 TimeoutStartSec=60

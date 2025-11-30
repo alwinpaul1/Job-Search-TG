@@ -4156,16 +4156,53 @@ def run_scrape(update: Update, context: CallbackContext, progress_msg):
 # --- Browse and End Handlers ---
 def page_navigation(update: Update, context: CallbackContext):
     query = update.callback_query
-    safe_answer_callback_query(query)
-
-    page = int(query.data.split("_")[1])
-    context.user_data["page"] = page
-    message_text, reply_markup = create_paginated_job_message(
-        context.user_data["jobs"], page
-    )
-
-    safe_edit_message(query, message_text, reply_markup, ParseMode.HTML, True)
-    return Browse
+    user_id = update.effective_user.id
+    
+    try:
+        safe_answer_callback_query(query)
+        
+        # Parse page number from callback data
+        callback_data = query.data
+        logger.debug(f"📄 Page navigation: user={user_id}, callback_data={callback_data}")
+        
+        page = int(callback_data.split("_")[1])
+        
+        # Check if jobs exist in user_data
+        jobs = context.user_data.get("jobs")
+        if not jobs:
+            logger.warning(f"⚠️ Page navigation: No jobs in user_data for user {user_id}")
+            query.edit_message_text("❌ Search results expired. Please start a new search.")
+            return MAIN_MENU
+        
+        context.user_data["page"] = page
+        message_text, reply_markup = create_paginated_job_message(jobs, page)
+        
+        if not message_text or not reply_markup:
+            logger.warning(f"⚠️ Page navigation: Empty message for page {page}, user {user_id}")
+            return Browse
+        
+        # Edit message with new page
+        try:
+            query.edit_message_text(
+                text=message_text,
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True
+            )
+            logger.debug(f"✅ Page {page + 1} displayed for user {user_id}")
+        except telegram.error.BadRequest as e:
+            if "message is not modified" in str(e).lower():
+                logger.debug(f"Page content unchanged for user {user_id}")
+            else:
+                logger.error(f"❌ Failed to edit page message: {e}")
+        except telegram.error.TimedOut:
+            logger.warning(f"⏰ Timeout editing page message for user {user_id}")
+        
+        return Browse
+        
+    except Exception as e:
+        logger.error(f"❌ Page navigation error for user {user_id}: {e}", exc_info=True)
+        return Browse
 
 
 def ignore_callback(update: Update, context: CallbackContext):
