@@ -16,6 +16,7 @@ __pycache__/
 # Database files
 *.db
 job_alerts.db
+*.service
 
 # Documentation files
 CLAUDE.md
