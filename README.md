@@ -185,4 +185,119 @@ The bot uses SQLite for storing:
 - Background tasks: Managed by APScheduler
 - Concurrent operations: Up to 10 workers
 
+## Auto-Restart & Crash Recovery
+
+The bot includes robust crash detection and auto-restart mechanisms to ensure continuous operation.
+
+### Built-in Crash Monitor
+The bot has an internal crash monitoring system that:
+- Tracks consecutive failures and triggers automatic restart
+- Monitors memory usage and performs emergency recovery
+- Detects hung processes via scheduler watchdog
+- Automatically restarts on critical failures
+
+### Running with Auto-Restart Wrapper
+
+For production deployments, use the included wrapper script:
+
+```bash
+# Make executable (first time only)
+chmod +x run_bot.sh
+
+# Start with auto-restart
+./run_bot.sh start
+
+# Check status
+./run_bot.sh status
+
+# Stop
+./run_bot.sh stop
+
+# Restart
+./run_bot.sh restart
+```
+
+The wrapper provides:
+- Automatic restart on crash
+- Memory monitoring (restarts if >2.2GB)
+- Hung process detection
+- Exponential backoff for rapid failures
+- Detailed logging to `bot_wrapper.log`
+
+### macOS LaunchAgent (Recommended for macOS)
+
+For macOS, use launchd for system-level management:
+
+```bash
+# Copy the plist file
+cp com.jobquest.bot.plist ~/Library/LaunchAgents/
+
+# Load and start
+launchctl load ~/Library/LaunchAgents/com.jobquest.bot.plist
+
+# Control commands
+launchctl start com.jobquest.bot    # Start
+launchctl stop com.jobquest.bot     # Stop
+launchctl list | grep jobquest      # Check status
+
+# Unload (disable)
+launchctl unload ~/Library/LaunchAgents/com.jobquest.bot.plist
+```
+
+### Linux systemd Service
+
+For Linux servers, use systemd:
+
+```bash
+# Copy service file
+sudo cp jobquest-bot.service /etc/systemd/system/
+
+# Edit and update paths
+sudo nano /etc/systemd/system/jobquest-bot.service
+
+# Reload, enable, and start
+sudo systemctl daemon-reload
+sudo systemctl enable jobquest-bot
+sudo systemctl start jobquest-bot
+
+# Control commands
+sudo systemctl status jobquest-bot   # Check status
+sudo systemctl restart jobquest-bot  # Restart
+sudo systemctl stop jobquest-bot     # Stop
+sudo journalctl -u jobquest-bot -f   # View logs
+```
+
+### Supervisord (Alternative)
+
+For cross-platform process management:
+
+```bash
+# Install supervisor
+pip install supervisor
+
+# Start with included config
+supervisord -c supervisord.conf
+
+# Control commands
+supervisorctl -c supervisord.conf status
+supervisorctl -c supervisord.conf restart jobquest-bot
+supervisorctl -c supervisord.conf tail -f jobquest-bot
+```
+
+### Configuration Options
+
+The auto-restart behavior can be configured in `bot.py`:
+
+```python
+AUTO_RESTART_ON_CRITICAL = True  # Enable/disable auto-restart
+MAX_CONSECUTIVE_FAILURES = 3    # Failures before restart
+MAX_MEMORY_MB = 2500            # Memory limit in MB
+```
+
+### Log Files
+
+- `diagnostic.log` - Detailed bot operation logs
+- `alert_monitor.log` - Alert check timing and status
+- `bot_wrapper.log` - Wrapper script logs
+- `restart_history.log` - Record of all restarts
 
