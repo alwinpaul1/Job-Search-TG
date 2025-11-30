@@ -28,12 +28,24 @@ fi
 
 LOG_FILE="$SCRIPT_DIR/bot_wrapper.log"
 PID_FILE="$SCRIPT_DIR/bot.pid"
-MAX_MEMORY_MB=2200  # Restart if memory exceeds this (slightly lower than bot's MAX_MEMORY_MB)
+
+# Memory thresholds (three-tier system)
+MEMORY_WARNING_MB=2200   # Warning threshold - wait and re-check (3 times)
+MEMORY_CRITICAL_MB=2800  # Critical threshold - quick re-check (1 time, 15s)
+MEMORY_EXTREME_MB=3200   # Extreme threshold - immediate restart (no wait, OOM imminent)
+MEMORY_CHECK_RETRIES=3   # Number of re-checks at warning level
+MEMORY_CHECK_WAIT=60     # Seconds to wait between re-checks at warning level
+MEMORY_CRITICAL_WAIT=15  # Seconds to wait for critical re-check (quick)
+
 MIN_RESTART_INTERVAL=30  # Minimum seconds between restarts
 MAX_RESTART_INTERVAL=3600  # Maximum backoff (1 hour)
 HEALTH_CHECK_INTERVAL=60  # Check health every 60 seconds
 MAX_RAPID_RESTARTS=5  # Maximum restarts within rapid restart window
 RAPID_RESTART_WINDOW=300  # 5 minutes window for rapid restart detection
+
+# Track memory occurrences
+high_memory_count=0
+critical_memory_count=0
 
 # Colors for output
 RED='\033[0;31m'
@@ -202,6 +214,76 @@ get_file_mtime() {
     fi
 }
 
+# Smart memory check with three-tier thresholds
+# Returns: 0 = OK, 1 = needs restart (after checks), 2 = critical restart needed
+check_memory_smart() {
+    local pid=$1
+    local mem=$(get_memory_usage "$pid")
+    
+    # Tier 1: EXTREME (>3.2GB) - Immediate restart, OOM imminent
+    if [ "$mem" -gt "$MEMORY_EXTREME_MB" ]; then
+        log_critical "🚨 EXTREME: Memory ($mem MB) exceeds extreme limit ($MEMORY_EXTREME_MB MB)!"
+        log_critical "⚡ IMMEDIATE restart - OOM crash imminent, no time to wait!"
+        high_memory_count=0
+        critical_memory_count=0
+        return 2
+    fi
+    
+    # Tier 2: CRITICAL (2.8-3.2GB) - Quick re-check (15s wait, 1 retry)
+    if [ "$mem" -gt "$MEMORY_CRITICAL_MB" ]; then
+        critical_memory_count=$((critical_memory_count + 1))
+        log_critical "🔴 CRITICAL: Memory at $mem MB (critical check $critical_memory_count/2)"
+        
+        if [ "$critical_memory_count" -ge 2 ]; then
+            log_critical "🚨 Memory still critical after quick re-check - restarting!"
+            critical_memory_count=0
+            high_memory_count=0
+            return 2
+        fi
+        
+        log_warn "⏱️ Quick re-check in ${MEMORY_CRITICAL_WAIT}s (might be a spike)..."
+        sleep "$MEMORY_CRITICAL_WAIT"
+        
+        # Re-check immediately
+        mem=$(get_memory_usage "$pid")
+        if [ "$mem" -gt "$MEMORY_CRITICAL_MB" ]; then
+            log_critical "🚨 Still critical ($mem MB) after ${MEMORY_CRITICAL_WAIT}s - restarting!"
+            critical_memory_count=0
+            high_memory_count=0
+            return 2
+        else
+            log_info "✅ Memory dropped to $mem MB after quick wait - spike resolved!"
+            critical_memory_count=0
+            return 0
+        fi
+    fi
+    
+    # Tier 3: WARNING (2.2-2.8GB) - Wait and re-check (60s wait, 3 retries)
+    if [ "$mem" -gt "$MEMORY_WARNING_MB" ]; then
+        high_memory_count=$((high_memory_count + 1))
+        critical_memory_count=0  # Reset critical counter
+        log_warn "⚠️ High memory detected: $mem MB (check $high_memory_count/$MEMORY_CHECK_RETRIES)"
+        
+        if [ "$high_memory_count" -ge "$MEMORY_CHECK_RETRIES" ]; then
+            log_critical "🚨 Memory persistently high after $MEMORY_CHECK_RETRIES checks - restarting"
+            high_memory_count=0
+            return 1
+        fi
+        
+        log_info "💡 Waiting ${MEMORY_CHECK_WAIT}s to see if memory drops (might be temporary spike)..."
+        return 0  # Don't restart yet, wait for next health check cycle
+    fi
+    
+    # Memory is OK - reset all counters
+    if [ "$high_memory_count" -gt 0 ] || [ "$critical_memory_count" -gt 0 ]; then
+        log_info "✅ Memory back to normal ($mem MB) - resetting counters"
+        high_memory_count=0
+        critical_memory_count=0
+    fi
+    
+    return 0
+}
+
 # Health check function
 health_check() {
     local pid=$1
@@ -212,11 +294,18 @@ health_check() {
         return 1
     fi
     
-    # Check memory usage
+    # Smart memory check with two-tier thresholds
     local mem=$(get_memory_usage "$pid")
-    if [ "$mem" -gt "$MAX_MEMORY_MB" ]; then
-        log_critical "🚨 Memory usage ($mem MB) exceeds limit ($MAX_MEMORY_MB MB)!"
-        log_warn "⚠️ Triggering restart due to high memory..."
+    check_memory_smart "$pid"
+    local mem_status=$?
+    
+    if [ "$mem_status" -eq 2 ]; then
+        # Critical - immediate restart
+        log_critical "🚨 CRITICAL memory - immediate restart!"
+        return 2
+    elif [ "$mem_status" -eq 1 ]; then
+        # Persistent high memory - restart
+        log_warn "⚠️ Persistent high memory - triggering restart..."
         return 2
     fi
     
@@ -303,11 +392,13 @@ main() {
     log_info "=========================================="
     log_info "🤖 JobQuestTG Bot Auto-Restart Wrapper"
     log_info "=========================================="
-    log_info "Configuration:"
-    log_info "  - Max Memory: $MAX_MEMORY_MB MB"
-    log_info "  - Health Check Interval: $HEALTH_CHECK_INTERVAL seconds"
-    log_info "  - Min Restart Interval: $MIN_RESTART_INTERVAL seconds"
-    log_info "  - Max Backoff: $MAX_RESTART_INTERVAL seconds"
+    log_info "Memory Thresholds (3-tier system):"
+    log_info "  - Warning  : >${MEMORY_WARNING_MB}MB  → Re-check ${MEMORY_CHECK_RETRIES}x (${MEMORY_CHECK_WAIT}s each)"
+    log_info "  - Critical : >${MEMORY_CRITICAL_MB}MB  → Quick re-check (${MEMORY_CRITICAL_WAIT}s)"
+    log_info "  - Extreme  : >${MEMORY_EXTREME_MB}MB  → Immediate restart"
+    log_info "Other Settings:"
+    log_info "  - Health Check: every ${HEALTH_CHECK_INTERVAL}s"
+    log_info "  - Restart Backoff: ${MIN_RESTART_INTERVAL}s - ${MAX_RESTART_INTERVAL}s"
     log_info "=========================================="
     
     check_existing_instance
