@@ -45,9 +45,18 @@ except ImportError:
 import re
 import signal
 import sys
+import subprocess
 import unicodedata
+import traceback
 from datetime import datetime, timedelta
 from urllib.parse import quote_plus
+
+# Auto-restart configuration
+AUTO_RESTART_ON_CRITICAL = True  # Enable auto-restart on critical failures
+MAX_CONSECUTIVE_FAILURES = 3  # Max failures before longer backoff
+RESTART_BACKOFF_SECONDS = 30  # Base backoff time
+_consecutive_failures = 0
+_last_failure_time = None
 
 import pytz
 import requests
@@ -184,6 +193,233 @@ heartbeat_active.set()  # Start with heartbeat active
 # Scheduler watchdog tracking
 last_scheduler_run = {'alert_check': None, 'memory_cleanup': None}
 scheduler_watchdog_lock = threading.Lock()
+
+# =============================================================================
+# CRASH DETECTION AND AUTO-RESTART SYSTEM
+# =============================================================================
+
+class CrashMonitor:
+    """
+    Monitors bot health and can trigger auto-restart on critical failures.
+    This provides an internal safety net in addition to external process managers.
+    """
+    
+    def __init__(self):
+        self.consecutive_failures = 0
+        self.last_failure_time = None
+        self.last_successful_operation = time.time()
+        self.memory_warnings = 0
+        self.critical_errors = []
+        self._lock = threading.Lock()
+        self.restart_requested = False
+        
+    def record_success(self):
+        """Record a successful operation"""
+        with self._lock:
+            self.consecutive_failures = 0
+            self.last_successful_operation = time.time()
+            
+    def record_failure(self, error_msg: str, is_critical: bool = False):
+        """Record a failure and check if restart is needed"""
+        with self._lock:
+            self.consecutive_failures += 1
+            self.last_failure_time = time.time()
+            
+            if is_critical:
+                self.critical_errors.append({
+                    'time': datetime.now().isoformat(),
+                    'error': str(error_msg)[:500]  # Limit error message size
+                })
+                # Keep only last 10 critical errors
+                self.critical_errors = self.critical_errors[-10:]
+            
+            # Check if restart is needed
+            if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                logger.critical(f"🚨 CRASH MONITOR: {self.consecutive_failures} consecutive failures detected!")
+                return True
+            
+            return False
+    
+    def record_memory_warning(self, memory_mb: float):
+        """Record a memory warning"""
+        with self._lock:
+            self.memory_warnings += 1
+            if self.memory_warnings >= 5:
+                logger.critical(f"🚨 CRASH MONITOR: {self.memory_warnings} memory warnings! Current: {memory_mb:.1f}MB")
+                return True
+            return False
+    
+    def reset_memory_warnings(self):
+        """Reset memory warning counter after successful cleanup"""
+        with self._lock:
+            self.memory_warnings = 0
+    
+    def get_health_status(self) -> dict:
+        """Get current health status"""
+        with self._lock:
+            time_since_success = time.time() - self.last_successful_operation
+            return {
+                'consecutive_failures': self.consecutive_failures,
+                'memory_warnings': self.memory_warnings,
+                'seconds_since_success': time_since_success,
+                'critical_errors_count': len(self.critical_errors),
+                'status': 'CRITICAL' if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES else
+                         'WARNING' if self.consecutive_failures > 0 else 'HEALTHY'
+            }
+    
+    def should_restart(self) -> bool:
+        """Check if bot should restart"""
+        with self._lock:
+            # Restart if too many consecutive failures
+            if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                return True
+            
+            # Restart if no successful operations in 30 minutes
+            time_since_success = time.time() - self.last_successful_operation
+            if time_since_success > 1800:  # 30 minutes
+                logger.critical(f"🚨 No successful operations in {time_since_success/60:.1f} minutes!")
+                return True
+            
+            return False
+
+# Global crash monitor instance
+crash_monitor = CrashMonitor()
+
+
+def trigger_self_restart():
+    """
+    Trigger a self-restart of the bot process.
+    This is a last resort when the bot is in an unrecoverable state.
+    """
+    global crash_monitor
+    
+    if not AUTO_RESTART_ON_CRITICAL:
+        logger.warning("⚠️ Auto-restart is disabled. Manual intervention required.")
+        return False
+    
+    logger.critical("🔄 TRIGGERING SELF-RESTART...")
+    logger.critical(f"📊 Crash monitor status: {crash_monitor.get_health_status()}")
+    
+    try:
+        # Log the restart
+        with open("restart_history.log", "a") as f:
+            f.write(f"{datetime.now().isoformat()} - Self-restart triggered\n")
+            f.write(f"  Status: {crash_monitor.get_health_status()}\n")
+        
+        # Set the restart flag
+        crash_monitor.restart_requested = True
+        
+        # Signal shutdown
+        shutdown_requested.set()
+        
+        # Give current operations a moment to complete
+        time.sleep(2)
+        
+        # Get the current script path
+        script_path = os.path.abspath(sys.argv[0])
+        python_path = sys.executable
+        
+        logger.critical(f"🚀 Restarting: {python_path} {script_path}")
+        
+        # Use exec to replace current process (cleaner restart)
+        os.execv(python_path, [python_path, script_path] + sys.argv[1:])
+        
+    except Exception as e:
+        logger.critical(f"❌ Self-restart failed: {e}")
+        logger.critical("💡 Please restart the bot manually or use the wrapper script")
+        return False
+    
+    return True
+
+
+def emergency_memory_recovery():
+    """
+    Emergency memory recovery procedure.
+    Called when memory is critically high and normal cleanup isn't working.
+    """
+    global _global_jobbert_model, _global_adaptive_matcher
+    import gc
+    
+    logger.critical("🆘 EMERGENCY MEMORY RECOVERY INITIATED")
+    
+    try:
+        # Step 1: Force unload all models
+        logger.info("Step 1: Force unloading models...")
+        _global_jobbert_model = None
+        _global_adaptive_matcher = None
+        
+        # Step 2: Clear all caches
+        logger.info("Step 2: Clearing caches...")
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        
+        # Step 3: Force garbage collection multiple times
+        logger.info("Step 3: Aggressive garbage collection...")
+        for i in range(5):
+            gc.collect()
+            time.sleep(0.5)
+        
+        # Step 4: Check memory after recovery
+        try:
+            import psutil
+            process = psutil.Process(os.getpid())
+            memory_after = process.memory_info().rss / 1024 / 1024
+            logger.info(f"✅ Memory after emergency recovery: {memory_after:.1f}MB")
+            
+            if memory_after < MAX_MEMORY_MB * 0.7:
+                crash_monitor.reset_memory_warnings()
+                logger.info("✅ Emergency recovery successful!")
+                return True
+            else:
+                logger.warning(f"⚠️ Memory still high after recovery: {memory_after:.1f}MB")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Could not verify memory after recovery: {e}")
+            return False
+            
+    except Exception as e:
+        logger.critical(f"❌ Emergency memory recovery failed: {e}")
+        return False
+
+
+def safe_operation(operation_name: str):
+    """
+    Decorator for wrapping operations with crash monitoring.
+    Records successes and failures, triggering restart if needed.
+    """
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            try:
+                result = func(*args, **kwargs)
+                crash_monitor.record_success()
+                return result
+            except MemoryError as e:
+                logger.critical(f"💥 MEMORY ERROR in {operation_name}: {e}")
+                should_restart = crash_monitor.record_failure(str(e), is_critical=True)
+                
+                # Try emergency recovery first
+                if emergency_memory_recovery():
+                    logger.info("✅ Recovered from memory error")
+                elif should_restart and AUTO_RESTART_ON_CRITICAL:
+                    trigger_self_restart()
+                raise
+                
+            except Exception as e:
+                logger.error(f"❌ Error in {operation_name}: {e}")
+                is_critical = isinstance(e, (SystemError, RuntimeError, OSError))
+                should_restart = crash_monitor.record_failure(str(e), is_critical=is_critical)
+                
+                if should_restart and AUTO_RESTART_ON_CRITICAL:
+                    logger.critical(f"🔄 Too many failures, triggering restart...")
+                    trigger_self_restart()
+                raise
+        return wrapper
+    return decorator
 
 # Simple database connection pool with dynamic sizing
 class DatabasePool:
@@ -5547,13 +5783,27 @@ def main():
                 try:
                     check_all_alerts(bot_instance)
                     logger.info(f"✅ Alert check completed in {time.time() - start_time:.1f}s")
+                    crash_monitor.record_success()  # Record successful alert check
                 except Exception as check_error:
                     logger.error(f"❌ Alert check failed: {check_error}", exc_info=True)
+                    
+                    # Record failure in crash monitor
+                    should_restart = crash_monitor.record_failure(
+                        f"Alert check failed: {check_error}", 
+                        is_critical=isinstance(check_error, (MemoryError, SystemError))
+                    )
+                    
                     # Try to recover from potential deadlocks
                     lock_status = model_lock.get_status()
                     if lock_status.get('locked') and lock_status.get('held_duration', 0) > 300:
                         logger.critical(f"🚨 Detected stuck lock during alert check - forcing recovery")
                         model_lock.force_release()
+                    
+                    # Check if we should restart
+                    if should_restart and AUTO_RESTART_ON_CRITICAL:
+                        logger.critical("🔄 Too many alert check failures - triggering restart!")
+                        trigger_self_restart()
+                        return
                 
                 # Cleanup after alert check
                 with memory_cleanup_lock:
@@ -5578,7 +5828,7 @@ def main():
                 logger.error(f"❌ Failed to cleanup after error: {cleanup_e}")
 
     def periodic_memory_cleanup():
-        """Periodic memory cleanup job with watchdog tracking"""
+        """Periodic memory cleanup job with watchdog tracking and crash detection"""
         if shutdown_requested.is_set():
             logger.info("🛑 Shutdown requested, skipping memory cleanup")
             return
@@ -5592,16 +5842,30 @@ def main():
                 current_memory = get_memory_usage()
                 logger.info(f"🧹 Periodic cleanup. Memory: {current_memory:.1f} MB")
                 
-                if current_memory > MAX_MEMORY_MB * 0.7:  # 70% of max
+                # Check for critical memory levels
+                if current_memory > MAX_MEMORY_MB * 0.95:
+                    logger.critical(f"🚨 CRITICAL MEMORY: {current_memory:.1f}MB - initiating emergency recovery!")
+                    if not emergency_memory_recovery():
+                        need_restart = crash_monitor.record_memory_warning(current_memory)
+                        if need_restart and AUTO_RESTART_ON_CRITICAL:
+                            logger.critical("🔄 Emergency recovery failed - triggering restart!")
+                            trigger_self_restart()
+                            return
+                elif current_memory > MAX_MEMORY_MB * 0.7:  # 70% of max
                     logger.info("Running periodic memory cleanup...")
                     force_memory_cleanup()
                     
                     # Unload model if memory is still high
                     if get_memory_usage() > MAX_MEMORY_MB * 0.8:
                         unload_jobbert_model()
+                
+                # Reset memory warnings if we're in good shape
+                if get_memory_usage() < MAX_MEMORY_MB * 0.6:
+                    crash_monitor.reset_memory_warnings()
                         
         except Exception as e:
             logger.error(f"❌ Periodic cleanup failed: {e}", exc_info=True)
+            crash_monitor.record_failure(f"Periodic cleanup failed: {e}", is_critical=False)
             # Don't retry cleanup here to avoid infinite loops
     
     def scheduler_watchdog():
@@ -5616,6 +5880,9 @@ def main():
                 alert_last_run = last_scheduler_run.get('alert_check')
                 cleanup_last_run = last_scheduler_run.get('memory_cleanup')
             
+            time_since_alert = 0
+            time_since_cleanup = 0
+            
             # Check alert checker (should run every 30 minutes)
             if alert_last_run:
                 time_since_alert = current_time - alert_last_run
@@ -5623,6 +5890,12 @@ def main():
                     logger.critical(f"🚨 SCHEDULER ALERT: Alert checker hasn't run in {time_since_alert/60:.1f} minutes!")
                     logger.critical(f"🔍 Last successful alert check: {time_since_alert/60:.1f} minutes ago")
                     logger.critical(f"💡 This may indicate scheduler failure or deadlock")
+                    
+                    # Record failure in crash monitor
+                    should_restart = crash_monitor.record_failure(
+                        f"Alert checker stuck for {time_since_alert/60:.1f} minutes", 
+                        is_critical=True
+                    )
                     
                     # Try to diagnose the issue
                     lock_status = model_lock.get_status()
@@ -5634,6 +5907,13 @@ def main():
                             logger.info(f"✅ Lock forcibly released - scheduler should resume")
                         except Exception as e:
                             logger.critical(f"❌ Failed to release lock: {e}")
+                    
+                    # If scheduler is stuck for over 2 hours, trigger restart
+                    if time_since_alert > 7200 and AUTO_RESTART_ON_CRITICAL:
+                        logger.critical("🔄 Scheduler stuck for over 2 hours - triggering restart!")
+                        trigger_self_restart()
+                        return
+                        
                 elif time_since_alert > 2400:  # 40 minutes warning
                     logger.warning(f"⚠️ Alert checker delayed: {time_since_alert/60:.1f} minutes since last run")
             
@@ -5643,14 +5923,21 @@ def main():
                 if time_since_cleanup > 1800:  # 30 minutes without running
                     logger.warning(f"⚠️ Memory cleanup hasn't run in {time_since_cleanup/60:.1f} minutes")
             
-            # Log scheduler health status
-            logger.info(f"🕐 Scheduler Watchdog: Alert check {time_since_alert/60:.1f}m ago, Cleanup {time_since_cleanup/60:.1f}m ago" if alert_last_run and cleanup_last_run else "🕐 Scheduler Watchdog: Waiting for first run")
+            # Log scheduler health status with crash monitor status
+            health_status = crash_monitor.get_health_status()
+            logger.info(f"🕐 Scheduler Watchdog: Alert check {time_since_alert/60:.1f}m ago, Cleanup {time_since_cleanup/60:.1f}m ago | Health: {health_status['status']}" if alert_last_run and cleanup_last_run else "🕐 Scheduler Watchdog: Waiting for first run")
+            
+            # Check if crash monitor recommends restart
+            if crash_monitor.should_restart() and AUTO_RESTART_ON_CRITICAL:
+                logger.critical("🔄 Crash monitor recommends restart - triggering!")
+                trigger_self_restart()
             
         except Exception as e:
             logger.error(f"❌ Scheduler watchdog failed: {e}", exc_info=True)
+            crash_monitor.record_failure(f"Watchdog failed: {e}", is_critical=False)
 
     def heartbeat_check():
-        """Enhanced heartbeat mechanism with detailed health monitoring"""
+        """Enhanced heartbeat mechanism with detailed health monitoring and crash detection"""
         if shutdown_requested.is_set():
             logger.info("🛑 Shutdown requested, skipping heartbeat")
             return
@@ -5663,6 +5950,19 @@ def main():
                 current_memory = health_check['current_memory_mb']
                 usage_percent = health_check['memory_usage_percent']
                 
+                # Check memory against crash monitor thresholds
+                if current_memory > MAX_MEMORY_MB * 0.9:
+                    need_restart = crash_monitor.record_memory_warning(current_memory)
+                    if need_restart and AUTO_RESTART_ON_CRITICAL:
+                        logger.critical(f"🚨 Memory critical ({current_memory:.1f}MB) - attempting emergency recovery first...")
+                        if not emergency_memory_recovery():
+                            logger.critical("🔄 Emergency recovery failed - triggering restart!")
+                            trigger_self_restart()
+                            return
+                else:
+                    # Memory is OK, record success
+                    crash_monitor.record_success()
+                
                 # Determine heartbeat emoji based on status
                 status_emoji = {
                     'HEALTHY': '💚',
@@ -5673,7 +5973,8 @@ def main():
                 
                 # Check if heartbeat is still active
                 if heartbeat_active.is_set():
-                    logger.info(f"{status_emoji} Heartbeat {current_time} - Memory: {current_memory:.1f}MB ({usage_percent:.1f}%) - Status: {status}")
+                    crash_health = crash_monitor.get_health_status()
+                    logger.info(f"{status_emoji} Heartbeat {current_time} - Memory: {current_memory:.1f}MB ({usage_percent:.1f}%) - Status: {status} | Failures: {crash_health['consecutive_failures']}")
                     
                     # Log detailed info for non-healthy states
                     if status != 'HEALTHY':
@@ -6010,12 +6311,28 @@ def main():
     dispatcher.add_handler(CommandHandler("stats", admin_stats))
 
     logger.info("Bot started polling...")
+    logger.info(f"🔧 Auto-restart enabled: {AUTO_RESTART_ON_CRITICAL}")
+    logger.info(f"📊 Crash monitor initialized - Status: {crash_monitor.get_health_status()['status']}")
+    
     try:
         updater.start_polling(timeout=30, read_latency=2)
         logger.info("✅ Bot is now running! Press Ctrl+C to stop.")
+        crash_monitor.record_success()  # Record successful startup
         updater.idle()
+    except MemoryError as e:
+        logger.critical(f"💥 MEMORY ERROR in main polling loop: {e}")
+        crash_monitor.record_failure(f"MemoryError: {e}", is_critical=True)
+        if AUTO_RESTART_ON_CRITICAL:
+            logger.critical("🔄 Attempting restart after memory error...")
+            trigger_self_restart()
+    except KeyboardInterrupt:
+        logger.info("🛑 Received keyboard interrupt, shutting down gracefully...")
     except Exception as e:
-        logger.error(f"Bot polling failed: {e}")
+        logger.error(f"Bot polling failed: {e}", exc_info=True)
+        should_restart = crash_monitor.record_failure(f"Polling failed: {e}", is_critical=True)
+        if should_restart and AUTO_RESTART_ON_CRITICAL:
+            logger.critical("🔄 Polling failure - triggering restart...")
+            trigger_self_restart()
     finally:
         logger.info("Shutting down bot...")
         try:
