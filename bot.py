@@ -849,11 +849,19 @@ def parse_date_posted_to_datetime(date_str):
 
 # --- Helper Functions ---
 def escape_markdown(text):
-    """Escape Markdown special characters for Telegram messages."""
+    """
+    Escape Markdown special characters for Telegram MarkdownV1.
+    
+    Telegram MarkdownV1 only uses: * _ ` [
+    We escape these to prevent them from being interpreted as formatting.
+    """
     if not text:
         return "N/A"
     text = str(text)
-    for char in ['\\', '*', '_', '`', '[', ']', '(', ')', '~', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
+    # For Telegram MarkdownV1, only these characters need escaping:
+    # * (bold), _ (italic), ` (code), [ (links)
+    # We also escape \ to prevent double-escaping issues
+    for char in ['\\', '*', '_', '`', '[']:
         text = text.replace(char, '\\' + char)
     return text
 
@@ -1484,7 +1492,7 @@ def saved_jobs_menu(update: Update, context: CallbackContext):
             db_pool.return_connection(conn)
 
     if total_count == 0:
-        text = "💾 *Saved Jobs*\n\nYou haven't saved any jobs yet.\n\n" \
+        text = "💾 <b>Saved Jobs</b>\n\nYou haven't saved any jobs yet.\n\n" \
                "Click the 💾 Save button on job alerts to save them here!"
         keyboard = [[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="main_menu")]]
 
@@ -1492,27 +1500,28 @@ def saved_jobs_menu(update: Update, context: CallbackContext):
             query.edit_message_text(
                 text,
                 reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode=ParseMode.MARKDOWN
+                parse_mode=ParseMode.HTML
             )
         except telegram.error.BadRequest as e:
             if "message is not modified" not in str(e).lower():
                 raise e
         return SAVED_JOBS
 
-    # Build message with saved jobs
+    # Build message with saved jobs using HTML (more reliable than Markdown)
     total_pages = (total_count + JOBS_PER_PAGE - 1) // JOBS_PER_PAGE
-    text = f"💾 *Saved Jobs* ({total_count} total)\n\n" \
+    text = f"💾 <b>Saved Jobs</b> ({total_count} total)\n\n" \
            f"📄 Page {page + 1} of {total_pages}\n\n"
 
     for idx, job in enumerate(saved_jobs, 1):
         job_num = offset + idx
-        title = escape_markdown(job[1])
-        company = escape_markdown(job[2])
-        location = escape_markdown(job[3] or "N/A")
-        date_posted = escape_markdown(job[4] or "N/A")
+        # Use html.escape for HTML content
+        title = html.escape(str(job[1]) if job[1] else "N/A")
+        company = html.escape(str(job[2]) if job[2] else "N/A")
+        location = html.escape(str(job[3]) if job[3] else "N/A")
+        date_posted = html.escape(str(job[4]) if job[4] else "N/A")
         saved_at = job[8]
 
-        text += f"{job_num}\\. *{title}*\n"
+        text += f"{job_num}. <b>{title}</b>\n"
         text += f"   🏢 {company}\n"
         text += f"   📍 {location}\n"
         text += f"   📅 Posted: {date_posted}\n"
@@ -1556,7 +1565,7 @@ def saved_jobs_menu(update: Update, context: CallbackContext):
         query.edit_message_text(
             text,
             reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN
+            parse_mode=ParseMode.HTML
         )
     except telegram.error.BadRequest as e:
         if "message is not modified" not in str(e).lower():
