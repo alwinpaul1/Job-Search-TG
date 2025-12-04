@@ -4630,7 +4630,7 @@ def alert_set_filters(update: Update, context: CallbackContext):
 
     text, keyboard = make_alert_preferences_menu(context)
     query.edit_message_text(
-        text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN
+        text, reply_markup=keyboard, parse_mode=ParseMode.HTML
     )
     return ALERT_PREFERENCES
 
@@ -4650,7 +4650,7 @@ def get_alert_prefs(context: CallbackContext) -> dict:
 def make_alert_preferences_menu(
     context: CallbackContext
 ) -> (str, InlineKeyboardMarkup):
-    """Create the alert preferences menu."""
+    """Create the alert preferences menu (uses HTML formatting)."""
     prefs = get_alert_prefs(context)
     keywords = context.user_data.get("alert_keywords", "N/A")
     location = context.user_data.get("alert_location", "N/A")
@@ -4669,15 +4669,19 @@ def make_alert_preferences_menu(
     else:
         workplace = "Any"
 
+    # Escape user-entered data for HTML
+    keywords_escaped = html.escape(str(keywords))
+    location_escaped = html.escape(str(location))
+
     text = (
-        f"⚙️ *Alert Filters*\n\n"
-        f"📝 *Keywords:* {keywords}\n"
-        f"📍 *Location:* {location}\n\n"
-        f"*Current Filters:*\n"
-        f"∙ *Date Posted:* `{date_posted}`\n"
-        f"∙ *Workplace:* `{workplace}`\n"
-        f"∙ *Experience:* `{experience}`\n"
-        f"∙ *Job Types:* `{job_types}`"
+        f"⚙️ <b>Alert Filters</b>\n\n"
+        f"📝 <b>Keywords:</b> {keywords_escaped}\n"
+        f"📍 <b>Location:</b> {location_escaped}\n\n"
+        f"<b>Current Filters:</b>\n"
+        f"∙ <b>Date Posted:</b> <code>{html.escape(date_posted)}</code>\n"
+        f"∙ <b>Workplace:</b> <code>{html.escape(workplace)}</code>\n"
+        f"∙ <b>Experience:</b> <code>{html.escape(experience)}</code>\n"
+        f"∙ <b>Job Types:</b> <code>{html.escape(job_types)}</code>"
     )
     keyboard = [
         [
@@ -4792,7 +4796,7 @@ def alert_preferences_done(update: Update, context: CallbackContext):
     query.answer()
     text, keyboard = make_alert_preferences_menu(context)
     query.edit_message_text(
-        text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN
+        text, reply_markup=keyboard, parse_mode=ParseMode.HTML
     )
     return ALERT_PREFERENCES
 
@@ -5229,7 +5233,7 @@ def edit_alert_start(update: Update, context: CallbackContext):
 
     text, keyboard = make_edit_alert_preferences_menu(context)
     query.edit_message_text(
-        text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN
+        text, reply_markup=keyboard, parse_mode=ParseMode.HTML
     )
     return EDIT_ALERT_PREFERENCES
 
@@ -5237,7 +5241,7 @@ def edit_alert_start(update: Update, context: CallbackContext):
 def make_edit_alert_preferences_menu(
     context: CallbackContext
 ) -> (str, InlineKeyboardMarkup):
-    """Create the edit alert preferences menu."""
+    """Create the edit alert preferences menu (uses HTML formatting)."""
     prefs = get_alert_prefs(context)
     keywords = context.user_data.get("alert_keywords", "N/A")
     location = context.user_data.get("alert_location", "N/A")
@@ -5251,15 +5255,19 @@ def make_edit_alert_preferences_menu(
     if prefs["workplace"]:
         workplace = list(prefs["workplace"].keys())[0]
 
+    # Escape user-entered data for HTML
+    keywords_escaped = html.escape(str(keywords))
+    location_escaped = html.escape(str(location))
+
     text = (
-        f"⚙️ *Edit Alert Preferences*\n\n"
-        f"📝 *Keywords:* {keywords}\n"
-        f"📍 *Location:* {location}\n\n"
-        f"*Current Filters:*\n"
-        f"∙ *Date Posted:* `{date_posted}`\n"
-        f"∙ *Workplace:* `{workplace}`\n"
-        f"∙ *Experience:* `{experience}`\n"
-        f"∙ *Job Types:* `{job_types}`"
+        f"⚙️ <b>Edit Alert Preferences</b>\n\n"
+        f"📝 <b>Keywords:</b> {keywords_escaped}\n"
+        f"📍 <b>Location:</b> {location_escaped}\n\n"
+        f"<b>Current Filters:</b>\n"
+        f"∙ <b>Date Posted:</b> <code>{html.escape(date_posted)}</code>\n"
+        f"∙ <b>Workplace:</b> <code>{html.escape(workplace)}</code>\n"
+        f"∙ <b>Experience:</b> <code>{html.escape(experience)}</code>\n"
+        f"∙ <b>Job Types:</b> <code>{html.escape(job_types)}</code>"
     )
     keyboard = [
         [
@@ -5446,7 +5454,7 @@ def edit_alert_preferences_done(update: Update, context: CallbackContext):
     query.answer()
     text, keyboard = make_edit_alert_preferences_menu(context)
     query.edit_message_text(
-        text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN
+        text, reply_markup=keyboard, parse_mode=ParseMode.HTML
     )
     return EDIT_ALERT_PREFERENCES
 
