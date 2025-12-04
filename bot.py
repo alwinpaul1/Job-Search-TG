@@ -975,6 +975,39 @@ def init_db():
         )
     """)
 
+    # Table for saved jobs (user bookmarks)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS saved_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            job_link TEXT NOT NULL,
+            job_title TEXT NOT NULL,
+            company TEXT NOT NULL,
+            location TEXT,
+            date_posted TEXT,
+            alert_keywords TEXT,
+            alert_location TEXT,
+            saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(chat_id, job_link)
+        )
+    """)
+
+    # Table for caching job details (for save button functionality)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS job_details_cache (
+            alert_id INTEGER NOT NULL,
+            job_id TEXT NOT NULL,
+            job_link TEXT NOT NULL,
+            job_title TEXT NOT NULL,
+            company TEXT NOT NULL,
+            location TEXT,
+            date_posted TEXT,
+            cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (alert_id, job_id),
+            FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
+        )
+    """)
+
     # --- Safe Table Migration ---
     # Check if new columns exist and add them if they don't
     # for backwards compatibility
@@ -1886,6 +1919,9 @@ def admin_stats(update: Update, context: CallbackContext):
         # Get database pool stats
         pool_stats = db_pool.get_stats()
         
+        # Get system resources
+        resources = get_system_resources()
+        
         stats_msg += f"""
 💾 **System Resources**
 • Memory: {resources.get('mem_mb', 0):.1f} MB ({resources.get('mem_pct', 0):.1f}%)
@@ -2049,7 +2085,10 @@ def ask_for_preference(
         )
         return GET_KEYWORD
     # locations
-    query.edit_for_preference(update, context, pref_type)
+    query.edit_message_text(
+        "Please send your preferred locations, separated by a comma "
+        "(e.g., New York, San Francisco, Remote)."
+    )
     return GET_LOCATION
 
 
