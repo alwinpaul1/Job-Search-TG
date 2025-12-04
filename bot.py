@@ -2086,8 +2086,8 @@ def ask_for_preference(
         return GET_KEYWORD
     # locations
     query.edit_message_text(
-        "Please send your preferred locations, separated by a comma "
-        "(e.g., New York, San Francisco, Remote)."
+        "Please send your preferred location "
+        "(e.g., New York, London, Remote)."
     )
     return GET_LOCATION
 
