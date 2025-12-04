@@ -5075,17 +5075,25 @@ def view_alert_details(update: Update, context: CallbackContext):
         except (ValueError, pytz.UnknownTimeZoneError):
             last_checked_display = last_checked_utc_str[:16] + " (UTC)"
 
+    # Use HTML to safely display user-entered keywords and location
+    keywords_escaped = html.escape(alert['keywords'])
+    location_escaped = html.escape(alert['location'])
+    experience_escaped = html.escape(experience)
+    job_types_escaped = html.escape(job_types)
+    date_posted_escaped = html.escape(date_posted)
+    workplace_escaped = html.escape(workplace)
+
     text = (
-        f"🔔 *Alert Details*\n\n"
-        f"📝 *Keywords:* {alert['keywords']}\n"
-        f"📍 *Location:* {alert['location']}\n"
-        f"📊 *Status:* {status_icon} {status_text}\n"
-        f"📬 *Jobs Sent:* {sent_count}\n\n"
-        f"*Current Filters:*\n"
-        f"∙ *Date Posted:* `{date_posted}`\n"
-        f"∙ *Workplace:* `{workplace}`\n"
-        f"∙ *Experience:* `{experience}`\n"
-        f"∙ *Job Types:* `{job_types}`\n\n"
+        f"🔔 <b>Alert Details</b>\n\n"
+        f"📝 <b>Keywords:</b> {keywords_escaped}\n"
+        f"📍 <b>Location:</b> {location_escaped}\n"
+        f"📊 <b>Status:</b> {status_icon} {status_text}\n"
+        f"📬 <b>Jobs Sent:</b> {sent_count}\n\n"
+        f"<b>Current Filters:</b>\n"
+        f"∙ <b>Date Posted:</b> <code>{date_posted_escaped}</code>\n"
+        f"∙ <b>Workplace:</b> <code>{workplace_escaped}</code>\n"
+        f"∙ <b>Experience:</b> <code>{experience_escaped}</code>\n"
+        f"∙ <b>Job Types:</b> <code>{job_types_escaped}</code>\n\n"
         f"🕒 Last checked: {last_checked_display}"
     )
 
@@ -5113,7 +5121,7 @@ def view_alert_details(update: Update, context: CallbackContext):
         query.edit_message_text(
             text,
             reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN
+            parse_mode=ParseMode.HTML
         )
     except telegram.error.BadRequest as e:
         if "message is not modified" not in str(e).lower():
