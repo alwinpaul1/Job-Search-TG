@@ -1963,7 +1963,8 @@ def start_search_flow(update: Update, context: CallbackContext):
 def keyword_received(update: Update, context: CallbackContext):
     context.user_data["search_keywords"] = update.message.text
     update.message.reply_text(
-        "Great. Now, what location are you interested in?"
+        "Great. Now, what location are you interested in?\n\n"
+        "⚠️ Note: Enter only ONE location (e.g., New York, Remote)."
     )
     return GET_SEARCH_LOCATION
 
@@ -2086,8 +2087,9 @@ def ask_for_preference(
         return GET_KEYWORD
     # locations
     query.edit_message_text(
-        "Please send your preferred location "
-        "(e.g., New York, London, Remote)."
+        "Please send your preferred location.\n"
+        "(e.g., New York, London, Remote)\n\n"
+        "⚠️ Note: Enter only ONE location."
     )
     return GET_LOCATION
 
@@ -4501,7 +4503,8 @@ def add_alert_keyword_received(update: Update, context: CallbackContext):
     """Receive the keywords for the new alert."""
     context.user_data["alert_keywords"] = update.message.text
     update.message.reply_text(
-        "Got it. Now, what location are you interested in?"
+        "Got it. Now, what location are you interested in?\n\n"
+        "⚠️ Note: Enter only ONE location (e.g., New York, Remote)."
     )
     return ADD_ALERT_LOCATION
 
