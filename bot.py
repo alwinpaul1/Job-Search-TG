@@ -6004,7 +6004,7 @@ def timezone_received(update: Update, context: CallbackContext):
     except pytz.UnknownTimeZoneError:
         update.message.reply_text(
             "❌ Invalid timezone identifier. Please check the list and try again.\n"
-            "Example: `Europe/Berlin`"
+            "Example: Europe/Berlin"
         )
         return SET_TIMEZONE
 
