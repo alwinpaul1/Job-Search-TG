@@ -421,37 +421,127 @@ def safe_operation(operation_name: str):
         return wrapper
     return decorator
 
-# Simple database connection pool with dynamic sizing
+# Fully dynamic database connection pool that auto-adjusts during runtime
 class DatabasePool:
-    def __init__(self, max_connections=5):
-        self.max_connections = max_connections
+    # Configuration constants
+    MIN_POOL_SIZE = 10
+    MAX_POOL_SIZE = 50
+    BASE_SIZE = 10
+    CONCURRENCY_FACTOR = 0.7
+    RESIZE_INTERVAL = 60  # Seconds between resize checks
+    
+    def __init__(self, initial_max=10):
+        self.max_connections = initial_max
         self.pool = []
         self.pool_lock = threading.Lock()
         self.active_connections = 0
-        logger.info(f"📊 Database pool initialized with max_connections={max_connections}")
+        self.checked_out = 0  # Track connections currently in use
+        self.last_resize_check = time.time()
+        self.resize_lock = threading.Lock()
+        logger.info(f"📊 Database pool initialized with max_connections={initial_max}")
+        
+    def _calculate_optimal_size(self):
+        """Calculate optimal pool size based on current active alerts."""
+        # Check for environment variable override
+        env_pool_size = os.getenv('DB_POOL_SIZE')
+        if env_pool_size:
+            try:
+                pool_size = int(env_pool_size)
+                if pool_size > 0:
+                    return pool_size
+            except ValueError:
+                pass
+        
+        try:
+            # Query database for active alerts count using a fresh connection
+            temp_conn = sqlite3.connect("job_alerts.db", timeout=5.0)
+            cursor = temp_conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM alerts WHERE is_active = 1")
+            active_alerts = cursor.fetchone()[0]
+            temp_conn.close()
+            
+            # Calculate pool size: base + (alerts * concurrency_factor)
+            calculated_size = int(self.BASE_SIZE + (active_alerts * self.CONCURRENCY_FACTOR))
+            
+            # Apply bounds
+            return max(self.MIN_POOL_SIZE, min(calculated_size, self.MAX_POOL_SIZE))
+            
+        except Exception as e:
+            logger.debug(f"Could not calculate pool size: {e}")
+            return self.max_connections  # Keep current size on error
+    
+    def _maybe_resize(self):
+        """Check if pool needs resizing (called periodically)."""
+        current_time = time.time()
+        
+        # Only check every RESIZE_INTERVAL seconds
+        if current_time - self.last_resize_check < self.RESIZE_INTERVAL:
+            return
+            
+        # Use non-blocking lock to avoid contention
+        if not self.resize_lock.acquire(blocking=False):
+            return
+            
+        try:
+            self.last_resize_check = current_time
+            new_size = self._calculate_optimal_size()
+            
+            if new_size != self.max_connections:
+                old_size = self.max_connections
+                self.max_connections = new_size
+                logger.info(f"📊 Database pool resized: {old_size} → {new_size} connections")
+                
+                # If shrinking, close excess idle connections
+                if new_size < old_size:
+                    with self.pool_lock:
+                        while len(self.pool) > new_size:
+                            try:
+                                conn = self.pool.pop()
+                                conn.close()
+                                if self.active_connections > 0:
+                                    self.active_connections -= 1
+                            except Exception:
+                                pass
+        finally:
+            self.resize_lock.release()
         
     def get_connection(self):
-        """Get a connection from the pool or create a new one"""
+        """Get a connection from the pool or create a new one."""
+        # Periodically check if resize is needed
+        self._maybe_resize()
+        
         with self.pool_lock:
+            # Try to get from pool first
             if self.pool:
+                self.checked_out += 1
                 return self.pool.pop()
-            elif self.active_connections < self.max_connections:
+            
+            # Create new connection if under limit
+            if self.active_connections < self.max_connections:
                 self.active_connections += 1
+                self.checked_out += 1
                 conn = self._create_connection()
                 return conn
-            else:
-                # Pool exhausted, create temporary connection
-                logger.warning("Database pool exhausted, creating temporary connection")
-                return self._create_connection()
+            
+            # Pool exhausted - expand dynamically instead of warning
+            # This allows the pool to grow beyond max temporarily under load
+            self.active_connections += 1
+            self.checked_out += 1
+            logger.debug(f"📊 Pool expanded: {self.active_connections} active (max: {self.max_connections})")
+            return self._create_connection()
     
     def return_connection(self, conn):
-        """Return a connection to the pool"""
+        """Return a connection to the pool."""
         if conn:
             try:
                 with self.pool_lock:
+                    self.checked_out = max(0, self.checked_out - 1)
+                    
+                    # Keep connection if pool isn't full
                     if len(self.pool) < self.max_connections:
                         self.pool.append(conn)
                     else:
+                        # Close excess connection
                         conn.close()
                         if self.active_connections > 0:
                             self.active_connections -= 1
@@ -461,11 +551,13 @@ class DatabasePool:
                     conn.close()
                 except Exception:
                     pass
-                if self.active_connections > 0:
-                    self.active_connections -= 1
+                with self.pool_lock:
+                    self.checked_out = max(0, self.checked_out - 1)
+                    if self.active_connections > 0:
+                        self.active_connections -= 1
     
     def _create_connection(self):
-        """Create a new database connection"""
+        """Create a new database connection."""
         conn = sqlite3.connect(
             "job_alerts.db",
             check_same_thread=False,
@@ -477,8 +569,23 @@ class DatabasePool:
         conn.execute("PRAGMA busy_timeout=5000;")
         return conn
     
+    def get_stats(self):
+        """Get current pool statistics."""
+        with self.pool_lock:
+            return {
+                "max_connections": self.max_connections,
+                "active_connections": self.active_connections,
+                "pooled_connections": len(self.pool),
+                "checked_out": self.checked_out
+            }
+    
+    def force_resize(self):
+        """Force an immediate resize check."""
+        self.last_resize_check = 0  # Reset timer to force check
+        self._maybe_resize()
+    
     def close_all(self):
-        """Close all connections in the pool"""
+        """Close all connections in the pool."""
         with self.pool_lock:
             while self.pool:
                 try:
@@ -487,21 +594,11 @@ class DatabasePool:
                 except Exception as e:
                     logger.warning(f"Error closing pooled connection: {e}")
             self.active_connections = 0
+            self.checked_out = 0
+
 
 def calculate_optimal_pool_size():
-    """
-    Calculate optimal database connection pool size dynamically.
-    
-    Factors considered:
-    - Number of active alerts (if database is accessible)
-    - Environment variable override
-    - System constraints
-    - Reasonable defaults
-    
-    Returns:
-        int: Optimal pool size
-    """
-    # Check for environment variable override first
+    """Calculate initial optimal pool size at startup."""
     env_pool_size = os.getenv('DB_POOL_SIZE')
     if env_pool_size:
         try:
@@ -509,43 +606,100 @@ def calculate_optimal_pool_size():
             if pool_size > 0:
                 logger.info(f"📊 Using DB_POOL_SIZE from environment: {pool_size}")
                 return pool_size
-            else:
-                logger.warning(f"⚠️ Invalid DB_POOL_SIZE in environment: {env_pool_size}, using dynamic calculation")
         except ValueError:
-            logger.warning(f"⚠️ Invalid DB_POOL_SIZE in environment: {env_pool_size}, using dynamic calculation")
-    
-    # Default pool sizes
-    min_pool_size = 10  # Minimum for production use
-    default_fallback = 10  # Fallback if calculation fails
-    max_pool_size = 50  # Safety cap
+            pass
     
     try:
-        # Try to query database for active alerts count
         temp_conn = sqlite3.connect("job_alerts.db", timeout=5.0)
         cursor = temp_conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM alerts WHERE is_active = 1")
         active_alerts = cursor.fetchone()[0]
         temp_conn.close()
         
-        # Calculate pool size based on active alerts
-        # Formula: base_size + (active_alerts * concurrency_factor)
-        # Concurrency factor: 0.7 (assumes ~70% of alerts may run simultaneously)
-        base_size = 10
-        concurrency_factor = 0.7
-        calculated_size = int(base_size + (active_alerts * concurrency_factor))
+        calculated_size = int(DatabasePool.BASE_SIZE + (active_alerts * DatabasePool.CONCURRENCY_FACTOR))
+        pool_size = max(DatabasePool.MIN_POOL_SIZE, min(calculated_size, DatabasePool.MAX_POOL_SIZE))
         
-        # Apply bounds
-        pool_size = max(min_pool_size, min(calculated_size, max_pool_size))
-        
-        logger.info(f"📊 Dynamic pool size calculation: {active_alerts} active alerts → {pool_size} connections")
+        logger.info(f"📊 Initial pool size: {active_alerts} active alerts → {pool_size} connections")
         return pool_size
         
     except Exception as e:
-        logger.warning(f"⚠️ Could not calculate dynamic pool size: {e}, using fallback default: {default_fallback}")
-        return default_fallback
+        logger.warning(f"⚠️ Could not calculate initial pool size: {e}, using default: {DatabasePool.MIN_POOL_SIZE}")
+        return DatabasePool.MIN_POOL_SIZE
 
-# Global database pool - dynamically sized based on active alerts
-db_pool = DatabasePool(max_connections=calculate_optimal_pool_size())
+# Global database pool - dynamically sized and auto-adjusts during runtime
+db_pool = DatabasePool(initial_max=calculate_optimal_pool_size())
+
+
+# Background CPU tracker for accurate CPU measurements
+class CPUTracker:
+    """
+    Tracks CPU usage in the background for accurate measurements.
+    psutil.cpu_percent() needs to be called periodically to get accurate readings.
+    """
+    def __init__(self, update_interval=2.0):
+        self.update_interval = update_interval
+        self.process_cpu = 0.0
+        self.system_cpu = 0.0
+        self.lock = threading.Lock()
+        self._running = False
+        self._thread = None
+        self._process = None
+        
+    def start(self):
+        """Start background CPU tracking."""
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._track_cpu, daemon=True)
+        self._thread.start()
+        logger.info("📊 CPU tracker started")
+        
+    def stop(self):
+        """Stop background CPU tracking."""
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=5.0)
+        logger.info("📊 CPU tracker stopped")
+        
+    def _track_cpu(self):
+        """Background thread that periodically updates CPU measurements."""
+        try:
+            import psutil
+            self._process = psutil.Process(os.getpid())
+            
+            # Initialize CPU measurement (first call always returns 0)
+            self._process.cpu_percent()
+            psutil.cpu_percent()
+            
+            while self._running:
+                try:
+                    time.sleep(self.update_interval)
+                    
+                    # Get CPU percentages
+                    proc_cpu = self._process.cpu_percent()
+                    sys_cpu = psutil.cpu_percent()
+                    
+                    with self.lock:
+                        self.process_cpu = proc_cpu
+                        self.system_cpu = sys_cpu
+                        
+                except Exception as e:
+                    logger.debug(f"CPU tracking error: {e}")
+                    
+        except Exception as e:
+            logger.warning(f"Failed to initialize CPU tracker: {e}")
+            
+    def get_cpu(self):
+        """Get current CPU usage."""
+        with self.lock:
+            return {
+                'process': self.process_cpu,
+                'system': self.system_cpu
+            }
+
+# Global CPU tracker instance
+cpu_tracker = CPUTracker(update_interval=2.0)
+
 
 # Signal handlers for graceful shutdown
 def signal_handler(signum, frame):
@@ -694,6 +848,16 @@ def parse_date_posted_to_datetime(date_str):
 
 
 # --- Helper Functions ---
+def escape_markdown(text):
+    """Escape Markdown special characters for Telegram messages."""
+    if not text:
+        return "N/A"
+    text = str(text)
+    for char in ['\\', '*', '_', '`', '[', ']', '(', ')', '~', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
+        text = text.replace(char, '\\' + char)
+    return text
+
+
 def safe_answer_callback_query(query):
     """Safely answer callback queries with timeout handling."""
     try:
@@ -1098,14 +1262,18 @@ def make_preferences_menu(
     workplace = ", ".join(prefs["workplace"].keys()) or "Any"
 
     # Get user timezone
-    conn = get_db_connection()
-    tz_row = conn.execute(
-        "SELECT timezone FROM user_settings WHERE chat_id = ?", (chat_id,)
-    ).fetchone()
-    conn.close()
+    conn = None
     user_timezone = "Not Set (UTC)"
-    if tz_row and tz_row["timezone"]:
-        user_timezone = tz_row["timezone"]
+    try:
+        conn = get_db_connection()
+        tz_row = conn.execute(
+            "SELECT timezone FROM user_settings WHERE chat_id = ?", (chat_id,)
+        ).fetchone()
+        if tz_row and tz_row["timezone"]:
+            user_timezone = tz_row["timezone"]
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
 
     text = (
         "⚙️ *Preferences*\n\n"
@@ -1290,26 +1458,30 @@ def saved_jobs_menu(update: Update, context: CallbackContext):
     chat_id = query.from_user.id
     page = context.user_data.get("saved_jobs_page", 0)
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
-    # Get total count
-    total_count = cursor.execute(
-        "SELECT COUNT(*) FROM saved_jobs WHERE chat_id = ?", (chat_id,)
-    ).fetchone()[0]
+        # Get total count
+        total_count = cursor.execute(
+            "SELECT COUNT(*) FROM saved_jobs WHERE chat_id = ?", (chat_id,)
+        ).fetchone()[0]
 
-    # Get saved jobs for current page
-    offset = page * JOBS_PER_PAGE
-    saved_jobs = cursor.execute(
-        """SELECT id, job_title, company, location, date_posted, job_link,
-           alert_keywords, alert_location, saved_at
-           FROM saved_jobs
-           WHERE chat_id = ?
-           ORDER BY saved_at DESC
-           LIMIT ? OFFSET ?""",
-        (chat_id, JOBS_PER_PAGE, offset)
-    ).fetchall()
-    conn.close()
+        # Get saved jobs for current page
+        offset = page * JOBS_PER_PAGE
+        saved_jobs = cursor.execute(
+            """SELECT id, job_title, company, location, date_posted, job_link,
+               alert_keywords, alert_location, saved_at
+               FROM saved_jobs
+               WHERE chat_id = ?
+               ORDER BY saved_at DESC
+               LIMIT ? OFFSET ?""",
+            (chat_id, JOBS_PER_PAGE, offset)
+        ).fetchall()
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
 
     if total_count == 0:
         text = "💾 *Saved Jobs*\n\nYou haven't saved any jobs yet.\n\n" \
@@ -1334,13 +1506,13 @@ def saved_jobs_menu(update: Update, context: CallbackContext):
 
     for idx, job in enumerate(saved_jobs, 1):
         job_num = offset + idx
-        title = html.escape(job[1])
-        company = html.escape(job[2])
-        location = html.escape(job[3] or "N/A")
-        date_posted = html.escape(job[4] or "N/A")
+        title = escape_markdown(job[1])
+        company = escape_markdown(job[2])
+        location = escape_markdown(job[3] or "N/A")
+        date_posted = escape_markdown(job[4] or "N/A")
         saved_at = job[8]
 
-        text += f"{job_num}. *{title}*\n"
+        text += f"{job_num}\\. *{title}*\n"
         text += f"   🏢 {company}\n"
         text += f"   📍 {location}\n"
         text += f"   📅 Posted: {date_posted}\n"
@@ -1409,76 +1581,76 @@ def save_job_callback(update: Update, context: CallbackContext):
     alert_id = parts[2]
     job_id = parts[3]
 
-    # Get job details from cache
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    job_data = cursor.execute(
-        """SELECT job_link, job_title, company, location, date_posted
-           FROM job_details_cache
-           WHERE alert_id = ? AND job_id = ?""",
-        (alert_id, job_id)
-    ).fetchone()
-
-    if not job_data:
-        conn.close()
-        query.answer("❌ Job not found")
-        return
-
-    # Get alert details
-    alert_data = cursor.execute(
-        """SELECT keywords, location
-           FROM alerts
-           WHERE id = ?""",
-        (alert_id,)
-    ).fetchone()
-
-    # Try to save the job
+    conn = None
     try:
-        cursor.execute(
-            """INSERT INTO saved_jobs
-               (chat_id, job_link, job_title, company, location, date_posted,
-                alert_keywords, alert_location)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (chat_id, job_data[0], job_data[1], job_data[2],
-             job_data[3], job_data[4],
-             alert_data[0] if alert_data else None,
-             alert_data[1] if alert_data else None)
-        )
-        conn.commit()
-        conn.close()
-        query.answer("✅ Job saved!")
+        # Get job details from cache
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
-        # Update button to show "✅ Saved"
+        job_data = cursor.execute(
+            """SELECT job_link, job_title, company, location, date_posted
+               FROM job_details_cache
+               WHERE alert_id = ? AND job_id = ?""",
+            (alert_id, job_id)
+        ).fetchone()
+
+        if not job_data:
+            query.answer("❌ Job not found")
+            return
+
+        # Get alert details
+        alert_data = cursor.execute(
+            """SELECT keywords, location
+               FROM alerts
+               WHERE id = ?""",
+            (alert_id,)
+        ).fetchone()
+
+        # Try to save the job
         try:
-            # Get the job_unique_id from callback data
-            job_unique_id = f"{alert_id}_{job_id}"
+            cursor.execute(
+                """INSERT INTO saved_jobs
+                   (chat_id, job_link, job_title, company, location, date_posted,
+                    alert_keywords, alert_location)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (chat_id, job_data[0], job_data[1], job_data[2],
+                 job_data[3], job_data[4],
+                 alert_data[0] if alert_data else None,
+                 alert_data[1] if alert_data else None)
+            )
+            conn.commit()
+            query.answer("✅ Job saved!")
 
-            # Update the message's inline keyboard
-            original_markup = query.message.reply_markup
-            new_keyboard = [
-                [
-                    InlineKeyboardButton("View Job", url=job_data[0]),
-                    InlineKeyboardButton(
-                        "✅ Saved", callback_data=f"unsave_from_alert_{job_unique_id}"
-                    )
-                ],
-                [
-                    InlineKeyboardButton("📋 My Alerts", callback_data="my_alerts"),
-                    InlineKeyboardButton("🏠 Start", callback_data="start_command")
+            # Update button to show "✅ Saved"
+            try:
+                # Get the job_unique_id from callback data
+                job_unique_id = f"{alert_id}_{job_id}"
+
+                # Update the message's inline keyboard
+                new_keyboard = [
+                    [
+                        InlineKeyboardButton("View Job", url=job_data[0]),
+                        InlineKeyboardButton(
+                            "✅ Saved", callback_data=f"unsave_from_alert_{job_unique_id}"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton("📋 My Alerts", callback_data="my_alerts"),
+                        InlineKeyboardButton("🏠 Start", callback_data="start_command")
+                    ]
                 ]
-            ]
-            query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(new_keyboard))
-        except Exception as e:
-            logger.error(f"Error updating button after save: {e}")
+                query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(new_keyboard))
+            except Exception as e:
+                logger.error(f"Error updating button after save: {e}")
 
-    except sqlite3.IntegrityError:
-        conn.close()
-        query.answer("ℹ️ Job already saved")
-    except Exception as e:
-        conn.close()
-        logger.error(f"Error saving job: {e}")
-        query.answer("❌ Error saving job")
+        except sqlite3.IntegrityError:
+            query.answer("ℹ️ Job already saved")
+        except Exception as e:
+            logger.error(f"Error saving job: {e}")
+            query.answer("❌ Error saving job")
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
 
 
 def unsave_from_alert_callback(update: Update, context: CallbackContext):
@@ -1497,49 +1669,55 @@ def unsave_from_alert_callback(update: Update, context: CallbackContext):
     alert_id = parts[3]
     job_id = parts[4]
 
-    # Get job link from cache
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    conn = None
+    job_link = None
+    try:
+        # Get job link from cache
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
-    job_data = cursor.execute(
-        """SELECT job_link FROM job_details_cache
-           WHERE alert_id = ? AND job_id = ?""",
-        (alert_id, job_id)
-    ).fetchone()
+        job_data = cursor.execute(
+            """SELECT job_link FROM job_details_cache
+               WHERE alert_id = ? AND job_id = ?""",
+            (alert_id, job_id)
+        ).fetchone()
 
-    if not job_data:
-        conn.close()
-        query.answer("❌ Job not found")
-        return
+        if not job_data:
+            query.answer("❌ Job not found")
+            return
 
-    # Delete the saved job
-    cursor.execute(
-        """DELETE FROM saved_jobs WHERE chat_id = ? AND job_link = ?""",
-        (chat_id, job_data[0])
-    )
-    conn.commit()
-    conn.close()
+        job_link = job_data[0]
 
-    query.answer("✅ Removed from saved jobs")
+        # Delete the saved job
+        cursor.execute(
+            """DELETE FROM saved_jobs WHERE chat_id = ? AND job_link = ?""",
+            (chat_id, job_link)
+        )
+        conn.commit()
+        query.answer("✅ Removed from saved jobs")
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
 
     # Update button to show "💾 Save"
-    try:
-        job_unique_id = f"{alert_id}_{job_id}"
-        new_keyboard = [
-            [
-                InlineKeyboardButton("View Job", url=job_data[0]),
-                InlineKeyboardButton(
-                    "💾 Save", callback_data=f"save_job_{job_unique_id}"
-                )
-            ],
-            [
-                InlineKeyboardButton("📋 My Alerts", callback_data="my_alerts"),
-                InlineKeyboardButton("🏠 Start", callback_data="start_command")
+    if job_link:
+        try:
+            job_unique_id = f"{alert_id}_{job_id}"
+            new_keyboard = [
+                [
+                    InlineKeyboardButton("View Job", url=job_link),
+                    InlineKeyboardButton(
+                        "💾 Save", callback_data=f"save_job_{job_unique_id}"
+                    )
+                ],
+                [
+                    InlineKeyboardButton("📋 My Alerts", callback_data="my_alerts"),
+                    InlineKeyboardButton("🏠 Start", callback_data="start_command")
+                ]
             ]
-        ]
-        query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(new_keyboard))
-    except Exception as e:
-        logger.error(f"Error updating button after unsave: {e}")
+            query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(new_keyboard))
+        except Exception as e:
+            logger.error(f"Error updating button after unsave: {e}")
 
 
 def unsave_job_callback(update: Update, context: CallbackContext):
@@ -1559,18 +1737,21 @@ def unsave_job_callback(update: Update, context: CallbackContext):
         query.answer("❌ Invalid job ID")
         return
 
-    # Delete the saved job by ID
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    conn = None
+    try:
+        # Delete the saved job by ID
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
-    cursor.execute(
-        """DELETE FROM saved_jobs WHERE id = ?""",
-        (saved_job_id,)
-    )
-    conn.commit()
-    conn.close()
-
-    query.answer("✅ Job removed from saved jobs")
+        cursor.execute(
+            """DELETE FROM saved_jobs WHERE id = ?""",
+            (saved_job_id,)
+        )
+        conn.commit()
+        query.answer("✅ Job removed from saved jobs")
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
 
     # Refresh the saved jobs view
     saved_jobs_menu(update, context)
@@ -1604,6 +1785,7 @@ def admin_stats(update: Update, context: CallbackContext):
         update.message.reply_text("⛔ This command is only available to the bot administrator.")
         return
 
+    conn = None
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -1665,11 +1847,6 @@ def admin_stats(update: Update, context: CallbackContext):
         """)
         popular_locations = cursor.fetchall()
 
-        # Get system resources
-        resources = get_system_resources()
-
-        conn.close()
-
         # Format the statistics message
         stats_msg = f"""📊 **Bot Statistics**
 
@@ -1697,12 +1874,22 @@ def admin_stats(update: Update, context: CallbackContext):
         for i, (location, count) in enumerate(popular_locations, 1):
             stats_msg += f"{i}. {location} ({count} alerts)\n"
 
+        # Get database pool stats
+        pool_stats = db_pool.get_stats()
+        
         stats_msg += f"""
 💾 **System Resources**
 • Memory: {resources.get('mem_mb', 0):.1f} MB ({resources.get('mem_pct', 0):.1f}%)
-• CPU: {resources.get('cpu_pct', 0):.1f}%
+• CPU (Process): {resources.get('cpu_pct', 0):.1f}%
+• CPU (System): {resources.get('sys_cpu_pct', 0):.1f}%
 • Threads: {resources.get('threads', 0)}
 • System Memory Available: {resources.get('sys_mem_avail_mb', 0):.1f} MB
+
+🗄️ **Database Pool**
+• Max Connections: {pool_stats['max_connections']}
+• Active Connections: {pool_stats['active_connections']}
+• Pooled (idle): {pool_stats['pooled_connections']}
+• In Use: {pool_stats['checked_out']}
 
 🤖 **Model Status**
 • JobBERT Loaded: {'Yes' if _global_jobbert_model else 'No'}
@@ -1715,6 +1902,9 @@ def admin_stats(update: Update, context: CallbackContext):
     except Exception as e:
         logger.error(f"Failed to generate admin stats: {e}", exc_info=True)
         update.message.reply_text(f"❌ Error generating statistics: {e}")
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
 
 
 # --- Search and Preferences Flow ---
@@ -1952,11 +2142,13 @@ def create_paginated_job_message(jobs, page):
         company = html.escape(job["Company"])
         location = html.escape(job["Location"])
         date_posted = html.escape(job["Date Posted"])
+        # Escape URL for safe use in HTML href attribute
+        job_link = html.escape(job["Link"], quote=True)
 
         message_text += f"<b>{title}</b>\n"
         message_text += f"<i>{company}</i> - {location}\n"
         message_text += f"Posted: {date_posted}\n"
-        message_text += f"<a href='{job['Link']}'>View Job</a>\n\n"
+        message_text += f'<a href="{job_link}">View Job</a>\n\n'
 
     if not jobs[start_index:end_index]:
         return "No jobs to display.", None
@@ -2557,9 +2749,10 @@ def get_system_resources():
         mem_info = process.memory_info()
         system_mem = psutil.virtual_memory()
 
-        # CPU info
-        cpu_percent = process.cpu_percent(interval=0.1)
-        system_cpu = psutil.cpu_percent(interval=0.1)
+        # CPU info - use background tracker for accurate readings
+        cpu_data = cpu_tracker.get_cpu()
+        cpu_percent = cpu_data['process']
+        system_cpu = cpu_data['system']
 
         # Thread info
         thread_count = process.num_threads()
@@ -4326,6 +4519,7 @@ def setup_alert_threaded(query, context, keywords, location, prefs):
     user_id = query.from_user.id
     chat_id = query.from_user.id
 
+    conn = None
     try:
         if not prefs:
             prefs = {
@@ -4380,7 +4574,6 @@ def setup_alert_threaded(query, context, keywords, location, prefs):
                 job["Company"], canonical_title, canonical_company
             ))
         conn.commit()
-        conn.close()
 
         logger.info(
             f"Populated {len(baseline_jobs)} baseline jobs for new alert ID "
@@ -4409,6 +4602,8 @@ def setup_alert_threaded(query, context, keywords, location, prefs):
         except Exception:
             pass
     finally:
+        if conn:
+            db_pool.return_connection(conn)
         unregister_user_operation(user_id, "alert_setup")
 
 
@@ -4723,12 +4918,16 @@ def my_alerts(update: Update, context: CallbackContext):
 
     chat_id = query.from_user.id
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    alerts = cursor.execute(
-        "SELECT * FROM alerts WHERE chat_id = ?", (chat_id,)
-    ).fetchall()
-    conn.close()
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        alerts = cursor.execute(
+            "SELECT * FROM alerts WHERE chat_id = ?", (chat_id,)
+        ).fetchall()
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
 
     if not alerts:
         text = "📋 *Your Alerts*\n\nYou have no alerts set up yet."
@@ -4809,35 +5008,39 @@ def view_alert_details(update: Update, context: CallbackContext):
 
     _, _, alert_id = query.data.split("_")
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    alert = cursor.execute(
-        "SELECT * FROM alerts WHERE id = ?", (alert_id,)
-    ).fetchone()
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        alert = cursor.execute(
+            "SELECT * FROM alerts WHERE id = ?", (alert_id,)
+        ).fetchone()
 
-    if not alert:
-        query.edit_message_text("❌ Alert not found.")
-        return MY_ALERTS
+        if not alert:
+            query.edit_message_text("❌ Alert not found.")
+            return MY_ALERTS
 
-    filters = json.loads(alert["filters"])
-    experience = ", ".join(filters["experience"].keys()) or "Any"
-    job_types = ", ".join(filters["job_types"].keys()) or "Any"
-    date_posted = "Any"
-    if filters["date_posted"]:
-        date_posted = list(filters["date_posted"].keys())[0]
-    workplace = "Any"
-    if filters["workplace"]:
-        workplace = list(filters["workplace"].keys())[0]
+        filters = json.loads(alert["filters"])
+        experience = ", ".join(filters["experience"].keys()) or "Any"
+        job_types = ", ".join(filters["job_types"].keys()) or "Any"
+        date_posted = "Any"
+        if filters["date_posted"]:
+            date_posted = list(filters["date_posted"].keys())[0]
+        workplace = "Any"
+        if filters["workplace"]:
+            workplace = list(filters["workplace"].keys())[0]
 
-    sent_count = cursor.execute(
-        "SELECT COUNT(*) FROM sent_jobs WHERE alert_id = ?", (alert_id,)
-    ).fetchone()[0]
+        sent_count = cursor.execute(
+            "SELECT COUNT(*) FROM sent_jobs WHERE alert_id = ?", (alert_id,)
+        ).fetchone()[0]
 
-    tz_row = cursor.execute(
-        "SELECT timezone FROM user_settings WHERE chat_id = ?",
-        (query.from_user.id,)
-    ).fetchone()
-    conn.close()
+        tz_row = cursor.execute(
+            "SELECT timezone FROM user_settings WHERE chat_id = ?",
+            (query.from_user.id,)
+        ).fetchone()
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
 
     user_timezone_str = tz_row["timezone"] if tz_row and tz_row["timezone"] \
         else "UTC"
@@ -4916,13 +5119,17 @@ def toggle_alert_status(update: Update, context: CallbackContext):
     action, _, alert_id = query.data.split("_")
     new_status = 0 if action == "pause" else 1
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "UPDATE alerts SET is_active = ? WHERE id = ?", (new_status, alert_id)
-    )
-    conn.commit()
-    conn.close()
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE alerts SET is_active = ? WHERE id = ?", (new_status, alert_id)
+        )
+        conn.commit()
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
 
     query.answer(f"Alert {'paused' if new_status == 0 else 'resumed'}.")
     return my_alerts(update, context)
@@ -4957,14 +5164,18 @@ def delete_alert_confirm(update: Update, context: CallbackContext):
     query = update.callback_query
     _, _, _, alert_id = query.data.split("_")
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
-    cursor.execute("DELETE FROM sent_jobs WHERE alert_id = ?", (alert_id,))
-    cursor.execute("DELETE FROM alerts WHERE id = ?", (alert_id,))
+        cursor.execute("DELETE FROM sent_jobs WHERE alert_id = ?", (alert_id,))
+        cursor.execute("DELETE FROM alerts WHERE id = ?", (alert_id,))
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
 
     query.answer("Alert and all associated job records deleted.")
     return my_alerts(update, context)
@@ -4977,12 +5188,16 @@ def edit_alert_start(update: Update, context: CallbackContext):
 
     _, _, alert_id = query.data.split("_")
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    alert = cursor.execute(
-        "SELECT * FROM alerts WHERE id = ?", (alert_id,)
-    ).fetchone()
-    conn.close()
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        alert = cursor.execute(
+            "SELECT * FROM alerts WHERE id = ?", (alert_id,)
+        ).fetchone()
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
 
     if not alert:
         query.edit_message_text("❌ Alert not found.")
@@ -5203,9 +5418,9 @@ def update_alert_baseline_threaded(
         except Exception:
             pass
     finally:
-        unregister_user_operation(user_id, "alert_update")
         if conn:
-            conn.close()
+            db_pool.return_connection(conn)
+        unregister_user_operation(user_id, "alert_update")
 
 
 def edit_alert_preferences_done(update: Update, context: CallbackContext):
@@ -5396,12 +5611,16 @@ def check_all_alerts(bot: Bot):
     """Scheduled job to check all active alerts with robust deduplication."""
     logger.info("Scheduler running: Checking all active alerts sequentially...")
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    active_alerts = cursor.execute(
-        "SELECT * FROM alerts WHERE is_active = 1"
-    ).fetchall()
-    conn.close()
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        active_alerts = cursor.execute(
+            "SELECT * FROM alerts WHERE is_active = 1"
+        ).fetchall()
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
 
     # Process alerts one by one instead of in parallel to save memory
     for alert in active_alerts:
@@ -5635,7 +5854,6 @@ def check_single_alert(alert, bot: Bot):
             (alert["id"],)
         )
         conn.commit()
-        conn.close()
 
         time.sleep(2)
 
@@ -5647,9 +5865,9 @@ def check_single_alert(alert, bot: Bot):
     finally:
         if conn:
             try:
-                conn.close()
+                db_pool.return_connection(conn)
             except Exception as e:
-                logger.error(f"Error closing database connection: {e}")
+                logger.error(f"Error returning database connection to pool: {e}")
         gc.collect()  # Always clean up memory after alert check
         
         # Log alert completion with key metrics
@@ -5691,15 +5909,19 @@ def timezone_received(update: Update, context: CallbackContext):
         pytz.timezone(user_timezone)
 
         chat_id = update.message.chat_id
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT OR REPLACE INTO user_settings (chat_id, timezone) "
-            "VALUES (?, ?)",
-            (chat_id, user_timezone),
-        )
-        conn.commit()
-        conn.close()
+        conn = None
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO user_settings (chat_id, timezone) "
+                "VALUES (?, ?)",
+                (chat_id, user_timezone),
+            )
+            conn.commit()
+        finally:
+            if conn:
+                db_pool.return_connection(conn)
 
         update.message.reply_text(
             f"✅ Timezone set to `{user_timezone}`.",
@@ -6351,6 +6573,9 @@ def main():
     logger.info(f"🔧 Auto-restart enabled: {AUTO_RESTART_ON_CRITICAL}")
     logger.info(f"📊 Crash monitor initialized - Status: {crash_monitor.get_health_status()['status']}")
     
+    # Start CPU tracker for accurate CPU measurements
+    cpu_tracker.start()
+    
     try:
         updater.start_polling(timeout=30, read_latency=2)
         logger.info("✅ Bot is now running! Press Ctrl+C to stop.")
@@ -6385,6 +6610,10 @@ def main():
             # Shutdown thread pool
             executor.shutdown(wait=False)
             logger.info("✅ Thread pool shutdown complete")
+            
+            # Stop CPU tracker
+            cpu_tracker.stop()
+            logger.info("✅ CPU tracker stopped")
             
             # Close database pool
             db_pool.close_all()
