@@ -5191,13 +5191,17 @@ def view_alert_details(update: Update, context: CallbackContext):
     status_icon = "🟢" if alert["is_active"] else "🔴"
     status_text = "Active" if alert["is_active"] else "Paused"
 
-    last_checked_utc_str = alert["last_checked"]
+    last_checked_val = alert["last_checked"]
     last_checked_display = "Never"
-    if last_checked_utc_str:
+    if last_checked_val:
         try:
-            utc_dt = datetime.strptime(
-                last_checked_utc_str.split(".")[0], "%Y-%m-%d %H:%M:%S"
-            ).replace(tzinfo=pytz.utc)
+            # Handle both datetime objects (PostgreSQL) and strings (SQLite)
+            if isinstance(last_checked_val, datetime):
+                utc_dt = last_checked_val.replace(tzinfo=pytz.utc) if last_checked_val.tzinfo is None else last_checked_val
+            else:
+                utc_dt = datetime.strptime(
+                    str(last_checked_val).split(".")[0], "%Y-%m-%d %H:%M:%S"
+                ).replace(tzinfo=pytz.utc)
 
             user_tz = pytz.timezone(user_timezone_str)
             local_dt = utc_dt.astimezone(user_tz)
@@ -5847,9 +5851,13 @@ def check_single_alert(alert, bot: Bot):
         last_checked = None
         if alert["last_checked"]:
             try:
-                last_checked = datetime.strptime(
-                    alert["last_checked"].split(".")[0], "%Y-%m-%d %H:%M:%S"
-                ).replace(tzinfo=pytz.utc)
+                # Handle both datetime objects (PostgreSQL) and strings (SQLite)
+                if isinstance(alert["last_checked"], datetime):
+                    last_checked = alert["last_checked"].replace(tzinfo=pytz.utc) if alert["last_checked"].tzinfo is None else alert["last_checked"]
+                else:
+                    last_checked = datetime.strptime(
+                        str(alert["last_checked"]).split(".")[0], "%Y-%m-%d %H:%M:%S"
+                    ).replace(tzinfo=pytz.utc)
             except ValueError:
                 logger.warning(
                     "Could not parse last_checked timestamp for alert %s",
