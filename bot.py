@@ -3,14 +3,44 @@ import html
 import json
 import logging
 import os
-import sqlite3
 import threading
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 
+import psycopg2
+import psycopg2.pool
+import psycopg2.extras
+from psycopg2 import sql as psql
+
 import telegram
 from dotenv import load_dotenv
+
+# Load environment variables early
+load_dotenv()
+
+# PostgreSQL Configuration from environment variables
+DATABASE_URL = os.getenv("DATABASE_URL")
+if DATABASE_URL:
+    # Parse DATABASE_URL (e.g., postgres://user:pass@host:port/dbname)
+    import urllib.parse
+    result = urllib.parse.urlparse(DATABASE_URL)
+    DB_CONFIG = {
+        "host": result.hostname,
+        "port": result.port or 5432,
+        "database": result.path[1:],  # Remove leading slash
+        "user": result.username,
+        "password": result.password,
+    }
+else:
+    # Individual environment variables
+    DB_CONFIG = {
+        "host": os.getenv("POSTGRES_HOST", "localhost"),
+        "port": int(os.getenv("POSTGRES_PORT", 5432)),
+        "database": os.getenv("POSTGRES_DB", "job_alerts"),
+        "user": os.getenv("POSTGRES_USER", "postgres"),
+        "password": os.getenv("POSTGRES_PASSWORD", ""),
+    }
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 
 try:
@@ -454,7 +484,14 @@ class DatabasePool:
         
         try:
             # Query database for active alerts count using a fresh connection
-            temp_conn = sqlite3.connect("job_alerts.db", timeout=5.0)
+            temp_conn = psycopg2.connect(
+                host=DB_CONFIG["host"],
+                port=DB_CONFIG["port"],
+                database=DB_CONFIG["database"],
+                user=DB_CONFIG["user"],
+                password=DB_CONFIG["password"],
+                connect_timeout=5
+            )
             cursor = temp_conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM alerts WHERE is_active = 1")
             active_alerts = cursor.fetchone()[0]
@@ -534,6 +571,12 @@ class DatabasePool:
         """Return a connection to the pool."""
         if conn:
             try:
+                # Rollback any uncommitted transaction before returning to pool
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                    
                 with self.pool_lock:
                     self.checked_out = max(0, self.checked_out - 1)
                     
@@ -558,15 +601,17 @@ class DatabasePool:
     
     def _create_connection(self):
         """Create a new database connection."""
-        conn = sqlite3.connect(
-            "job_alerts.db",
-            check_same_thread=False,
-            timeout=10.0
+        conn = psycopg2.connect(
+            host=DB_CONFIG["host"],
+            port=DB_CONFIG["port"],
+            database=DB_CONFIG["database"],
+            user=DB_CONFIG["user"],
+            password=DB_CONFIG["password"],
+            connect_timeout=10,
+            options="-c statement_timeout=30000"  # 30 second query timeout
         )
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        conn.execute("PRAGMA busy_timeout=5000;")
+        # Use RealDictCursor for dict-like row access
+        conn.cursor_factory = psycopg2.extras.RealDictCursor
         return conn
     
     def get_stats(self):
@@ -576,7 +621,8 @@ class DatabasePool:
                 "max_connections": self.max_connections,
                 "active_connections": self.active_connections,
                 "pooled_connections": len(self.pool),
-                "checked_out": self.checked_out
+                "checked_out": self.checked_out,
+                "min_connections": getattr(self, 'min_connections', 5)
             }
     
     def force_resize(self):
@@ -610,7 +656,14 @@ def calculate_optimal_pool_size():
             pass
     
     try:
-        temp_conn = sqlite3.connect("job_alerts.db", timeout=5.0)
+        temp_conn = psycopg2.connect(
+            host=DB_CONFIG["host"],
+            port=DB_CONFIG["port"],
+            database=DB_CONFIG["database"],
+            user=DB_CONFIG["user"],
+            password=DB_CONFIG["password"],
+            connect_timeout=5
+        )
         cursor = temp_conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM alerts WHERE is_active = 1")
         active_alerts = cursor.fetchone()[0]
@@ -780,9 +833,6 @@ warnings.filterwarnings(
     module="telegram.ext.conversationhandler",
 )
 
-# Load environment variables
-load_dotenv()
-
 # Admin configuration
 ADMIN_USER_ID = 7744296624  # Your Telegram user ID
 
@@ -928,186 +978,210 @@ WORKPLACE_TYPES = {"On-site": "1", "Remote": "2", "Hybrid": "3"}
 
 # --- Database Setup ---
 def init_db():
-    """Initialize the SQLite database and create/update tables."""
-    with db_lock:
-        conn = sqlite3.connect("job_alerts.db", check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL")  # Enable WAL mode for better concurrency
-        conn.execute("PRAGMA synchronous=NORMAL")  # Balance between safety and performance
-        conn.execute("PRAGMA temp_store=memory")   # Store temp data in memory
-        conn.execute("PRAGMA mmap_size=67108864")  # 64MB memory-mapped I/O
-        cursor = conn.cursor()
-
-    # Table for storing user alerts
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS alerts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER NOT NULL,
-            keywords TEXT NOT NULL,
-            location TEXT NOT NULL,
-            filters TEXT,
-            is_active INTEGER DEFAULT 1,
-            last_checked TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # Table for tracking jobs sent, now with robust deduplication
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sent_jobs (
-            alert_id INTEGER,
-            chat_id INTEGER NOT NULL,
-            job_link TEXT NOT NULL,
-            job_id TEXT NOT NULL,
-            job_title TEXT NOT NULL,
-            company TEXT NOT NULL,
-            canonical_title TEXT NOT NULL,
-            canonical_company TEXT NOT NULL,
-            sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (alert_id, job_link),
-            FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
-        )
-    """)
-
-    # Add new user_settings table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_settings (
-            chat_id INTEGER PRIMARY KEY,
-            timezone TEXT
-        )
-    """)
-
-    # Table for saved jobs (user bookmarks)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS saved_jobs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER NOT NULL,
-            job_link TEXT NOT NULL,
-            job_title TEXT NOT NULL,
-            company TEXT NOT NULL,
-            location TEXT,
-            date_posted TEXT,
-            alert_keywords TEXT,
-            alert_location TEXT,
-            saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(chat_id, job_link)
-        )
-    """)
-
-    # Table for caching job details (for save button functionality)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS job_details_cache (
-            alert_id INTEGER NOT NULL,
-            job_id TEXT NOT NULL,
-            job_link TEXT NOT NULL,
-            job_title TEXT NOT NULL,
-            company TEXT NOT NULL,
-            location TEXT,
-            date_posted TEXT,
-            cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (alert_id, job_id),
-            FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
-        )
-    """)
-
-    # --- Safe Table Migration ---
-    # Check if new columns exist and add them if they don't
-    # for backwards compatibility
+    """Initialize the PostgreSQL database and create/update tables."""
+    conn = None
     try:
-        cursor.execute("SELECT job_title, company FROM sent_jobs LIMIT 1")
-    except sqlite3.OperationalError:
-        logger.info(
-            "Upgrading sent_jobs table: adding job_title and company "
-            "columns..."
-        )
-        try:
-            cursor.execute(
-                "ALTER TABLE sent_jobs "
-                "ADD COLUMN job_title TEXT NOT NULL DEFAULT 'N/A'"
+        with db_lock:
+            conn = psycopg2.connect(
+                host=DB_CONFIG["host"],
+                port=DB_CONFIG["port"],
+                database=DB_CONFIG["database"],
+                user=DB_CONFIG["user"],
+                password=DB_CONFIG["password"],
+                connect_timeout=10
             )
-        except sqlite3.OperationalError:
-            pass  # Column might exist from a partial migration
-        try:
-            cursor.execute(
-                "ALTER TABLE sent_jobs "
-                "ADD COLUMN company TEXT NOT NULL DEFAULT 'N/A'"
-            )
-        except sqlite3.OperationalError:
-            pass  # Column might exist
+            conn.autocommit = False
+            cursor = conn.cursor()
 
-    # Check and add new columns for robust deduplication
-    columns_to_add = [
-        ("chat_id", "INTEGER NOT NULL DEFAULT 0"),
-        ("job_id", "TEXT NOT NULL DEFAULT ''"),
-        ("canonical_title", "TEXT NOT NULL DEFAULT ''"),
-        ("canonical_company", "TEXT NOT NULL DEFAULT ''"),
-        ("sent_at", "TIMESTAMP"),
-    ]
-
-    for col_name, col_def in columns_to_add:
-        try:
-            cursor.execute(f"SELECT {col_name} FROM sent_jobs LIMIT 1")
-        except sqlite3.OperationalError:
-            logger.info(f"Adding {col_name} column to sent_jobs table...")
-            try:
-                cursor.execute(
-                    f"ALTER TABLE sent_jobs ADD COLUMN {col_name} {col_def}"
-                )
-            except sqlite3.OperationalError as e:
-                logger.warning(f"Failed to add {col_name}: {e}")
-
-    # Migrate existing data to new format
-    try:
-        # Update job_id for existing records
-        cursor.execute(
-            "UPDATE sent_jobs SET job_id = ? "
-            "WHERE job_id = '' OR job_id IS NULL", ("",)
-        )
-        rows = cursor.execute(
-            "SELECT rowid, job_link, job_title, company "
-            "FROM sent_jobs WHERE job_id = ''"
-        ).fetchall()
-        for row in rows:
-            job_id = canonical_link(row[1])
-            canonical_title = canonical_text(row[2])
-            canonical_company = canonical_text(row[3])
-            cursor.execute(
-                "UPDATE sent_jobs SET job_id = ?, "
-                "canonical_title = ?, canonical_company = ? WHERE rowid = ?",
-                (job_id, canonical_title, canonical_company, row[0]),
-            )
-
-        # Update chat_id for existing records by joining with alerts
+        # Table for storing user alerts
         cursor.execute("""
-            UPDATE sent_jobs
-            SET chat_id = (SELECT chat_id FROM alerts
-                           WHERE alerts.id = sent_jobs.alert_id)
-            WHERE chat_id = 0 OR chat_id IS NULL
+            CREATE TABLE IF NOT EXISTS alerts (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                keywords TEXT NOT NULL,
+                location TEXT NOT NULL,
+                filters TEXT,
+                is_active INTEGER DEFAULT 1,
+                last_checked TIMESTAMP DEFAULT NOW()
+            )
         """)
 
-        logger.info("Migrated existing sent_jobs data to new format")
-    except Exception as e:
-        logger.warning(f"Migration warning (non-critical): {e}")
+        # Table for tracking jobs sent, now with robust deduplication
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sent_jobs (
+                alert_id INTEGER,
+                chat_id BIGINT NOT NULL,
+                job_link TEXT NOT NULL,
+                job_id TEXT NOT NULL,
+                job_title TEXT NOT NULL,
+                company TEXT NOT NULL,
+                canonical_title TEXT NOT NULL,
+                canonical_company TEXT NOT NULL,
+                sent_at TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (alert_id, job_link),
+                FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
+            )
+        """)
 
-    # Create indexes for efficient deduplication
-    try:
-        cursor.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_jobid "
-            "ON sent_jobs(alert_id, job_id)"
-        )
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_chat_jobid "
-            "ON sent_jobs(chat_id, job_id)"
-        )
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_canonical "
-            "ON sent_jobs(chat_id, canonical_title, canonical_company)"
-        )
-        logger.info("Created deduplication indexes")
-    except Exception as e:
-        logger.warning(f"Index creation warning: {e}")
+        # Add new user_settings table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_settings (
+                chat_id BIGINT PRIMARY KEY,
+                timezone TEXT
+            )
+        """)
 
-    conn.commit()
-    conn.close()
-    logger.info("Database initialized and schema updated successfully.")
+        # Table for saved jobs (user bookmarks)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS saved_jobs (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                job_link TEXT NOT NULL,
+                job_title TEXT NOT NULL,
+                company TEXT NOT NULL,
+                location TEXT,
+                date_posted TEXT,
+                alert_keywords TEXT,
+                alert_location TEXT,
+                saved_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE(chat_id, job_link)
+            )
+        """)
+
+        # Table for caching job details (for save button functionality)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS job_details_cache (
+                alert_id INTEGER NOT NULL,
+                job_id TEXT NOT NULL,
+                job_link TEXT NOT NULL,
+                job_title TEXT NOT NULL,
+                company TEXT NOT NULL,
+                location TEXT,
+                date_posted TEXT,
+                cached_at TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (alert_id, job_id),
+                FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
+            )
+        """)
+
+        # --- Safe Table Migration for PostgreSQL ---
+        # Check if new columns exist and add them if they don't
+        # for backwards compatibility
+        try:
+            cursor.execute("SELECT job_title, company FROM sent_jobs LIMIT 1")
+        except psycopg2.Error:
+            conn.rollback()
+            logger.info(
+                "Upgrading sent_jobs table: adding job_title and company "
+                "columns..."
+            )
+            try:
+                cursor.execute(
+                    "ALTER TABLE sent_jobs "
+                    "ADD COLUMN IF NOT EXISTS job_title TEXT NOT NULL DEFAULT 'N/A'"
+                )
+            except psycopg2.Error:
+                conn.rollback()
+            try:
+                cursor.execute(
+                    "ALTER TABLE sent_jobs "
+                    "ADD COLUMN IF NOT EXISTS company TEXT NOT NULL DEFAULT 'N/A'"
+                )
+            except psycopg2.Error:
+                conn.rollback()
+
+        # Check and add new columns for robust deduplication (PostgreSQL syntax)
+        columns_to_add = [
+            ("chat_id", "BIGINT NOT NULL DEFAULT 0"),
+            ("job_id", "TEXT NOT NULL DEFAULT ''"),
+            ("canonical_title", "TEXT NOT NULL DEFAULT ''"),
+            ("canonical_company", "TEXT NOT NULL DEFAULT ''"),
+            ("sent_at", "TIMESTAMP"),
+        ]
+
+        for col_name, col_def in columns_to_add:
+            try:
+                cursor.execute(
+                    f"ALTER TABLE sent_jobs ADD COLUMN IF NOT EXISTS {col_name} {col_def}"
+                )
+            except psycopg2.Error as e:
+                conn.rollback()
+                logger.warning(f"Failed to add {col_name}: {e}")
+
+        # Migrate existing data to new format
+        try:
+            # Update job_id for existing records
+            cursor.execute(
+                "UPDATE sent_jobs SET job_id = %s "
+                "WHERE job_id = '' OR job_id IS NULL", ("",)
+            )
+            cursor.execute(
+                "SELECT ctid, job_link, job_title, company "
+                "FROM sent_jobs WHERE job_id = ''"
+            )
+            rows = cursor.fetchall()
+            for row in rows:
+                job_id = canonical_link(row[1])
+                c_title = canonical_text(row[2])
+                c_company = canonical_text(row[3])
+                cursor.execute(
+                    "UPDATE sent_jobs SET job_id = %s, "
+                    "canonical_title = %s, canonical_company = %s WHERE ctid = %s",
+                    (job_id, c_title, c_company, row[0]),
+                )
+
+            # Update chat_id for existing records by joining with alerts
+            cursor.execute("""
+                UPDATE sent_jobs
+                SET chat_id = alerts.chat_id
+                FROM alerts
+                WHERE alerts.id = sent_jobs.alert_id
+                AND (sent_jobs.chat_id = 0 OR sent_jobs.chat_id IS NULL)
+            """)
+
+            logger.info("Migrated existing sent_jobs data to new format")
+        except Exception as e:
+            conn.rollback()
+            logger.warning(f"Migration warning (non-critical): {e}")
+
+        # Create indexes for efficient deduplication
+        try:
+            cursor.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_jobid "
+                "ON sent_jobs(alert_id, job_id)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_chat_jobid "
+                "ON sent_jobs(chat_id, job_id)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_canonical "
+                "ON sent_jobs(chat_id, canonical_title, canonical_company)"
+            )
+            # Additional performance indexes for PostgreSQL
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_alerts_active "
+                "ON alerts(is_active) WHERE is_active = 1"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_alerts_chat_id "
+                "ON alerts(chat_id)"
+            )
+            logger.info("Created deduplication and performance indexes")
+        except Exception as e:
+            conn.rollback()
+            logger.warning(f"Index creation warning: {e}")
+
+        conn.commit()
+        logger.info("PostgreSQL database initialized and schema updated successfully.")
+    except psycopg2.Error as e:
+        logger.error(f"Failed to initialize PostgreSQL database: {e}")
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 
 def get_db_connection():
@@ -1118,10 +1192,12 @@ def get_db_connection():
     for attempt in range(max_retries):
         try:
             conn = db_pool.get_connection()
+            # Set cursor factory for dict-like access
+            conn.cursor_factory = psycopg2.extras.RealDictCursor
             return conn
-        except sqlite3.OperationalError as e:
-            if "database is locked" in str(e).lower() and attempt < max_retries - 1:
-                logger.warning(f"Database locked, retrying in {retry_delay}s (attempt {attempt + 1})")
+        except psycopg2.OperationalError as e:
+            if attempt < max_retries - 1:
+                logger.warning(f"Database connection failed, retrying in {retry_delay}s (attempt {attempt + 1}): {e}")
                 time.sleep(retry_delay)
                 retry_delay *= 2  # Exponential backoff
                 continue
@@ -1150,15 +1226,15 @@ def safe_db_operation(operation_func, *args, **kwargs):
                 db_pool.return_connection(conn)  # Return connection to pool
                 conn = None  # Mark as returned to avoid double-return
                 return result
-        except sqlite3.OperationalError as e:
+        except psycopg2.OperationalError as e:
             if conn:
                 try:
                     conn.close()  # Don't return corrupted connections to pool
                 except Exception:
                     pass
                 conn = None
-            if "database is locked" in str(e).lower() and attempt < max_retries - 1:
-                logger.warning(f"Database locked, retrying in {retry_delay}s... (attempt {attempt + 1})")
+            if attempt < max_retries - 1:
+                logger.warning(f"Database operation failed, retrying in {retry_delay}s... (attempt {attempt + 1}): {e}")
                 time.sleep(retry_delay)
                 retry_delay *= 2  # Exponential backoff
                 continue
@@ -1180,7 +1256,7 @@ def safe_db_operation(operation_func, *args, **kwargs):
                 except Exception as e:
                     logger.warning(f"Failed to return database connection to pool: {e}")
     
-    raise sqlite3.OperationalError("Database operation failed after all retries")
+    raise psycopg2.OperationalError("Database operation failed after all retries")
 
 
 # --- Data Persistence Helper ---
@@ -1305,11 +1381,14 @@ def make_preferences_menu(
     # Get user timezone
     conn = None
     user_timezone = "Not Set (UTC)"
+    conn = None
     try:
         conn = get_db_connection()
-        tz_row = conn.execute(
-            "SELECT timezone FROM user_settings WHERE chat_id = ?", (chat_id,)
-        ).fetchone()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT timezone FROM user_settings WHERE chat_id = %s", (chat_id,)
+        )
+        tz_row = cursor.fetchone()
         if tz_row and tz_row["timezone"]:
             user_timezone = tz_row["timezone"]
     finally:
@@ -1505,21 +1584,23 @@ def saved_jobs_menu(update: Update, context: CallbackContext):
         cursor = conn.cursor()
 
         # Get total count
-        total_count = cursor.execute(
-            "SELECT COUNT(*) FROM saved_jobs WHERE chat_id = ?", (chat_id,)
-        ).fetchone()[0]
+        cursor.execute(
+            "SELECT COUNT(*) FROM saved_jobs WHERE chat_id = %s", (chat_id,)
+        )
+        total_count = cursor.fetchone()["count"]
 
         # Get saved jobs for current page
         offset = page * JOBS_PER_PAGE
-        saved_jobs = cursor.execute(
+        cursor.execute(
             """SELECT id, job_title, company, location, date_posted, job_link,
                alert_keywords, alert_location, saved_at
                FROM saved_jobs
-               WHERE chat_id = ?
+               WHERE chat_id = %s
                ORDER BY saved_at DESC
-               LIMIT ? OFFSET ?""",
+               LIMIT %s OFFSET %s""",
             (chat_id, JOBS_PER_PAGE, offset)
-        ).fetchall()
+        )
+        saved_jobs = cursor.fetchall()
     finally:
         if conn:
             db_pool.return_connection(conn)
@@ -1548,24 +1629,24 @@ def saved_jobs_menu(update: Update, context: CallbackContext):
     for idx, job in enumerate(saved_jobs, 1):
         job_num = offset + idx
         # Use html.escape for HTML content
-        title = html.escape(str(job[1]) if job[1] else "N/A")
-        company = html.escape(str(job[2]) if job[2] else "N/A")
-        location = html.escape(str(job[3]) if job[3] else "N/A")
-        date_posted = html.escape(str(job[4]) if job[4] else "N/A")
-        saved_at = job[8]
+        title = html.escape(str(job["job_title"]) if job["job_title"] else "N/A")
+        company = html.escape(str(job["company"]) if job["company"] else "N/A")
+        location = html.escape(str(job["location"]) if job["location"] else "N/A")
+        date_posted = html.escape(str(job["date_posted"]) if job["date_posted"] else "N/A")
+        saved_at = str(job["saved_at"]) if job["saved_at"] else ""
 
         text += f"{job_num}. <b>{title}</b>\n"
         text += f"   🏢 {company}\n"
         text += f"   📍 {location}\n"
         text += f"   📅 Posted: {date_posted}\n"
-        text += f"   💾 Saved: {saved_at[:10]}\n\n"
+        text += f"   💾 Saved: {saved_at[:10] if saved_at else 'N/A'}\n\n"
 
     # Build keyboard with job links and navigation
     keyboard = []
     for idx, job in enumerate(saved_jobs):
         job_num = offset + idx + 1
-        saved_job_id = job[0]  # Use the database ID
-        job_link = job[5]
+        saved_job_id = job["id"]  # Use the database ID
+        job_link = job["job_link"]
 
         keyboard.append([
             InlineKeyboardButton(
@@ -1629,24 +1710,26 @@ def save_job_callback(update: Update, context: CallbackContext):
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        job_data = cursor.execute(
+        cursor.execute(
             """SELECT job_link, job_title, company, location, date_posted
                FROM job_details_cache
-               WHERE alert_id = ? AND job_id = ?""",
+               WHERE alert_id = %s AND job_id = %s""",
             (alert_id, job_id)
-        ).fetchone()
+        )
+        job_data = cursor.fetchone()
 
         if not job_data:
             query.answer("❌ Job not found")
             return
 
         # Get alert details
-        alert_data = cursor.execute(
+        cursor.execute(
             """SELECT keywords, location
                FROM alerts
-               WHERE id = ?""",
+               WHERE id = %s""",
             (alert_id,)
-        ).fetchone()
+        )
+        alert_data = cursor.fetchone()
 
         # Try to save the job
         try:
@@ -1654,11 +1737,11 @@ def save_job_callback(update: Update, context: CallbackContext):
                 """INSERT INTO saved_jobs
                    (chat_id, job_link, job_title, company, location, date_posted,
                     alert_keywords, alert_location)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (chat_id, job_data[0], job_data[1], job_data[2],
-                 job_data[3], job_data[4],
-                 alert_data[0] if alert_data else None,
-                 alert_data[1] if alert_data else None)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                (chat_id, job_data["job_link"], job_data["job_title"], job_data["company"],
+                 job_data["location"], job_data["date_posted"],
+                 alert_data["keywords"] if alert_data else None,
+                 alert_data["location"] if alert_data else None)
             )
             conn.commit()
             query.answer("✅ Job saved!")
@@ -1671,7 +1754,7 @@ def save_job_callback(update: Update, context: CallbackContext):
                 # Update the message's inline keyboard
                 new_keyboard = [
                     [
-                        InlineKeyboardButton("View Job", url=job_data[0]),
+                        InlineKeyboardButton("View Job", url=job_data["job_link"]),
                         InlineKeyboardButton(
                             "✅ Saved", callback_data=f"unsave_from_alert_{job_unique_id}"
                         )
@@ -1685,7 +1768,8 @@ def save_job_callback(update: Update, context: CallbackContext):
             except Exception as e:
                 logger.error(f"Error updating button after save: {e}")
 
-        except sqlite3.IntegrityError:
+        except psycopg2.IntegrityError:
+            conn.rollback()
             query.answer("ℹ️ Job already saved")
         except Exception as e:
             logger.error(f"Error saving job: {e}")
@@ -1718,21 +1802,22 @@ def unsave_from_alert_callback(update: Update, context: CallbackContext):
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        job_data = cursor.execute(
+        cursor.execute(
             """SELECT job_link FROM job_details_cache
-               WHERE alert_id = ? AND job_id = ?""",
+               WHERE alert_id = %s AND job_id = %s""",
             (alert_id, job_id)
-        ).fetchone()
+        )
+        job_data = cursor.fetchone()
 
         if not job_data:
             query.answer("❌ Job not found")
             return
 
-        job_link = job_data[0]
+        job_link = job_data["job_link"]
 
         # Delete the saved job
         cursor.execute(
-            """DELETE FROM saved_jobs WHERE chat_id = ? AND job_link = ?""",
+            """DELETE FROM saved_jobs WHERE chat_id = %s AND job_link = %s""",
             (chat_id, job_link)
         )
         conn.commit()
@@ -1786,7 +1871,7 @@ def unsave_job_callback(update: Update, context: CallbackContext):
         cursor = conn.cursor()
 
         cursor.execute(
-            """DELETE FROM saved_jobs WHERE id = ?""",
+            """DELETE FROM saved_jobs WHERE id = %s""",
             (saved_job_id,)
         )
         conn.commit()
@@ -1834,40 +1919,40 @@ def admin_stats(update: Update, context: CallbackContext):
 
         # Get total unique users
         cursor.execute("SELECT COUNT(DISTINCT chat_id) FROM alerts")
-        total_users = cursor.fetchone()[0]
+        total_users = cursor.fetchone()["count"]
 
         # Get total active alerts
         cursor.execute("SELECT COUNT(*) FROM alerts WHERE is_active = 1")
-        active_alerts = cursor.fetchone()[0]
+        active_alerts = cursor.fetchone()["count"]
 
         # Get total paused alerts
         cursor.execute("SELECT COUNT(*) FROM alerts WHERE is_active = 0")
-        paused_alerts = cursor.fetchone()[0]
+        paused_alerts = cursor.fetchone()["count"]
 
         # Get alerts checked in last 24 hours (using last_checked as proxy for activity)
         cursor.execute("""
             SELECT COUNT(*) FROM alerts
-            WHERE datetime(last_checked) > datetime('now', '-1 day')
+            WHERE last_checked > NOW() - INTERVAL '1 day'
         """)
-        active_alerts_24h = cursor.fetchone()[0]
+        active_alerts_24h = cursor.fetchone()["count"]
 
         # Get alerts checked in last 7 days
         cursor.execute("""
             SELECT COUNT(*) FROM alerts
-            WHERE datetime(last_checked) > datetime('now', '-7 days')
+            WHERE last_checked > NOW() - INTERVAL '7 days'
         """)
-        active_alerts_7d = cursor.fetchone()[0]
+        active_alerts_7d = cursor.fetchone()["count"]
 
         # Get total jobs sent
         cursor.execute("SELECT COUNT(*) FROM sent_jobs")
-        total_jobs_sent = cursor.fetchone()[0]
+        total_jobs_sent = cursor.fetchone()["count"]
 
         # Get jobs sent in last 24 hours
         cursor.execute("""
             SELECT COUNT(*) FROM sent_jobs
-            WHERE datetime(sent_at) > datetime('now', '-1 day')
+            WHERE sent_at > NOW() - INTERVAL '1 day'
         """)
-        jobs_sent_24h = cursor.fetchone()[0]
+        jobs_sent_24h = cursor.fetchone()["count"]
 
         # Get most popular search keywords (top 5)
         cursor.execute("""
@@ -1909,12 +1994,12 @@ def admin_stats(update: Update, context: CallbackContext):
 🔍 **Popular Keywords**
 """
 
-        for i, (keyword, count) in enumerate(popular_keywords, 1):
-            stats_msg += f"{i}. {keyword} ({count} alerts)\n"
+        for i, row in enumerate(popular_keywords, 1):
+            stats_msg += f"{i}. {row['keywords']} ({row['count']} alerts)\n"
 
         stats_msg += "\n🌍 **Popular Locations**\n"
-        for i, (location, count) in enumerate(popular_locations, 1):
-            stats_msg += f"{i}. {location} ({count} alerts)\n"
+        for i, row in enumerate(popular_locations, 1):
+            stats_msg += f"{i}. {row['location']} ({row['count']} alerts)\n"
 
         # Get database pool stats
         pool_stats = db_pool.get_stats()
@@ -1930,11 +2015,9 @@ def admin_stats(update: Update, context: CallbackContext):
 • Threads: {resources.get('threads', 0)}
 • System Memory Available: {resources.get('sys_mem_avail_mb', 0):.1f} MB
 
-🗄️ **Database Pool**
+🗄️ **Database Pool (PostgreSQL)**
 • Max Connections: {pool_stats['max_connections']}
-• Active Connections: {pool_stats['active_connections']}
-• Pooled (idle): {pool_stats['pooled_connections']}
-• In Use: {pool_stats['checked_out']}
+• Checked Out: {pool_stats['checked_out']}
 
 🤖 **Model Status**
 • JobBERT Loaded: {'Yes' if _global_jobbert_model else 'No'}
@@ -4585,10 +4668,10 @@ def setup_alert_threaded(query, context, keywords, location, prefs):
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO alerts (chat_id, keywords, location, filters) "
-            "VALUES (?, ?, ?, ?)",
+            "VALUES (%s, %s, %s, %s) RETURNING id",
             (chat_id, keywords, location, filters_json),
         )
-        alert_id = cursor.lastrowid
+        alert_id = cursor.fetchone()["id"]
         conn.commit()
 
         date_posted_value = None
@@ -4616,10 +4699,11 @@ def setup_alert_threaded(query, context, keywords, location, prefs):
             canonical_title = canonical_text(job["Title"])
             canonical_company = canonical_text(job["Company"])
             cursor.execute("""
-                INSERT OR IGNORE INTO sent_jobs
+                INSERT INTO sent_jobs
                 (alert_id, chat_id, job_link, job_id, job_title, company,
                  canonical_title, canonical_company, sent_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (alert_id, job_link) DO NOTHING
             """, (
                 alert_id, chat_id, job["Link"], job_id, job["Title"],
                 job["Company"], canonical_title, canonical_company
@@ -4977,9 +5061,10 @@ def my_alerts(update: Update, context: CallbackContext):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        alerts = cursor.execute(
-            "SELECT * FROM alerts WHERE chat_id = ?", (chat_id,)
-        ).fetchall()
+        cursor.execute(
+            "SELECT * FROM alerts WHERE chat_id = %s", (chat_id,)
+        )
+        alerts = cursor.fetchall()
     finally:
         if conn:
             db_pool.return_connection(conn)
@@ -5067,9 +5152,10 @@ def view_alert_details(update: Update, context: CallbackContext):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        alert = cursor.execute(
-            "SELECT * FROM alerts WHERE id = ?", (alert_id,)
-        ).fetchone()
+        cursor.execute(
+            "SELECT * FROM alerts WHERE id = %s", (alert_id,)
+        )
+        alert = cursor.fetchone()
 
         if not alert:
             query.edit_message_text("❌ Alert not found.")
@@ -5085,14 +5171,16 @@ def view_alert_details(update: Update, context: CallbackContext):
         if filters["workplace"]:
             workplace = list(filters["workplace"].keys())[0]
 
-        sent_count = cursor.execute(
-            "SELECT COUNT(*) FROM sent_jobs WHERE alert_id = ?", (alert_id,)
-        ).fetchone()[0]
+        cursor.execute(
+            "SELECT COUNT(*) FROM sent_jobs WHERE alert_id = %s", (alert_id,)
+        )
+        sent_count = cursor.fetchone()["count"]
 
-        tz_row = cursor.execute(
-            "SELECT timezone FROM user_settings WHERE chat_id = ?",
+        cursor.execute(
+            "SELECT timezone FROM user_settings WHERE chat_id = %s",
             (query.from_user.id,)
-        ).fetchone()
+        )
+        tz_row = cursor.fetchone()
     finally:
         if conn:
             db_pool.return_connection(conn)
@@ -5187,7 +5275,7 @@ def toggle_alert_status(update: Update, context: CallbackContext):
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE alerts SET is_active = ? WHERE id = ?", (new_status, alert_id)
+            "UPDATE alerts SET is_active = %s WHERE id = %s", (new_status, alert_id)
         )
         conn.commit()
     finally:
@@ -5232,8 +5320,8 @@ def delete_alert_confirm(update: Update, context: CallbackContext):
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        cursor.execute("DELETE FROM sent_jobs WHERE alert_id = ?", (alert_id,))
-        cursor.execute("DELETE FROM alerts WHERE id = ?", (alert_id,))
+        cursor.execute("DELETE FROM sent_jobs WHERE alert_id = %s", (alert_id,))
+        cursor.execute("DELETE FROM alerts WHERE id = %s", (alert_id,))
 
         conn.commit()
     finally:
@@ -5255,9 +5343,10 @@ def edit_alert_start(update: Update, context: CallbackContext):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        alert = cursor.execute(
-            "SELECT * FROM alerts WHERE id = ?", (alert_id,)
-        ).fetchone()
+        cursor.execute(
+            "SELECT * FROM alerts WHERE id = %s", (alert_id,)
+        )
+        alert = cursor.fetchone()
     finally:
         if conn:
             db_pool.return_connection(conn)
@@ -5389,7 +5478,7 @@ def update_alert_baseline_threaded(
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE alerts SET filters = ? WHERE id = ?",
+            "UPDATE alerts SET filters = %s WHERE id = %s",
             (filters_json, alert_id),
         )
         conn.commit()
@@ -5417,7 +5506,7 @@ def update_alert_baseline_threaded(
 
         cursor.execute(
             "SELECT job_id, canonical_title, canonical_company "
-            "FROM sent_jobs WHERE chat_id = ?",
+            "FROM sent_jobs WHERE chat_id = %s",
             (chat_id,)
         )
         sent_jobs = cursor.fetchall()
@@ -5448,12 +5537,14 @@ def update_alert_baseline_threaded(
                 )
 
         if new_jobs_to_insert:
-            cursor.executemany("""
-                INSERT OR IGNORE INTO sent_jobs
-                (alert_id, chat_id, job_link, job_id, job_title,
-                 company, canonical_title, canonical_company, sent_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            """, new_jobs_to_insert)
+            for job_data in new_jobs_to_insert:
+                cursor.execute("""
+                    INSERT INTO sent_jobs
+                    (alert_id, chat_id, job_link, job_id, job_title,
+                     company, canonical_title, canonical_company, sent_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (alert_id, job_link) DO NOTHING
+                """, job_data)
             conn.commit()
 
         logger.info(
@@ -5682,9 +5773,10 @@ def check_all_alerts(bot: Bot):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        active_alerts = cursor.execute(
+        cursor.execute(
             "SELECT * FROM alerts WHERE is_active = 1"
-        ).fetchall()
+        )
+        active_alerts = cursor.fetchall()
     finally:
         if conn:
             db_pool.return_connection(conn)
@@ -5773,8 +5865,8 @@ def check_single_alert(alert, bot: Bot):
             # Check for duplicates directly in the database to save memory
             cursor.execute(
                 """SELECT 1 FROM sent_jobs WHERE
-                   (chat_id = ? AND job_id = ?) OR
-                   (chat_id = ? AND canonical_title = ? AND canonical_company = ?)
+                   (chat_id = %s AND job_id = %s) OR
+                   (chat_id = %s AND canonical_title = %s AND canonical_company = %s)
                    LIMIT 1""",
                 (alert["chat_id"], job_id, alert["chat_id"], canonical_title, canonical_company)
             )
@@ -5836,10 +5928,11 @@ def check_single_alert(alert, bot: Bot):
             job["_job_id_for_callback"] = job_id_for_callback
 
             # Check if job is already saved
-            is_saved = cursor.execute(
-                "SELECT 1 FROM saved_jobs WHERE chat_id = ? AND job_link = ?",
+            cursor.execute(
+                "SELECT 1 FROM saved_jobs WHERE chat_id = %s AND job_link = %s",
                 (alert["chat_id"], job["Link"])
-            ).fetchone() is not None
+            )
+            is_saved = cursor.fetchone() is not None
 
             # Show "✅ Saved" if already saved, otherwise "💾 Save"
             save_button_text = "✅ Saved" if is_saved else "💾 Save"
@@ -5889,12 +5982,14 @@ def check_single_alert(alert, bot: Bot):
                 )
 
         if new_jobs_to_insert_db:
-            cursor.executemany("""
-                INSERT OR IGNORE INTO sent_jobs
-                (alert_id, chat_id, job_link, job_id, job_title,
-                 company, canonical_title, canonical_company, sent_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            """, new_jobs_to_insert_db)
+            for job_data in new_jobs_to_insert_db:
+                cursor.execute("""
+                    INSERT INTO sent_jobs
+                    (alert_id, chat_id, job_link, job_id, job_title,
+                     company, canonical_title, canonical_company, sent_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (alert_id, job_link) DO NOTHING
+                """, job_data)
             logger.info(
                 "Sent and recorded %s new job(s) for alert ID %s.",
                 len(new_jobs_to_insert_db), alert["id"]
@@ -5909,15 +6004,23 @@ def check_single_alert(alert, bot: Bot):
             ))
 
         if job_cache_data:
-            cursor.executemany("""
-                INSERT OR REPLACE INTO job_details_cache
-                (alert_id, job_id, job_link, job_title, company, location,
-                 date_posted, cached_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            """, job_cache_data)
+            for cache_data in job_cache_data:
+                cursor.execute("""
+                    INSERT INTO job_details_cache
+                    (alert_id, job_id, job_link, job_title, company, location,
+                     date_posted, cached_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (alert_id, job_id) DO UPDATE SET
+                        job_link = EXCLUDED.job_link,
+                        job_title = EXCLUDED.job_title,
+                        company = EXCLUDED.company,
+                        location = EXCLUDED.location,
+                        date_posted = EXCLUDED.date_posted,
+                        cached_at = NOW()
+                """, cache_data)
 
         cursor.execute(
-            "UPDATE alerts SET last_checked = CURRENT_TIMESTAMP WHERE id = ?",
+            "UPDATE alerts SET last_checked = NOW() WHERE id = %s",
             (alert["id"],)
         )
         conn.commit()
@@ -5981,8 +6084,9 @@ def timezone_received(update: Update, context: CallbackContext):
             conn = get_db_connection()
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT OR REPLACE INTO user_settings (chat_id, timezone) "
-                "VALUES (?, ?)",
+                """INSERT INTO user_settings (chat_id, timezone) 
+                VALUES (%s, %s)
+                ON CONFLICT (chat_id) DO UPDATE SET timezone = EXCLUDED.timezone""",
                 (chat_id, user_timezone),
             )
             conn.commit()

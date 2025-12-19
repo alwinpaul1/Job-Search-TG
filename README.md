@@ -74,16 +74,42 @@ Just click the link or search for `@JobQuestTG_Bot` in Telegram and send `/start
    pip install -r requirements.txt
    ```
 
-4. **Set up environment variables**
+4. **Set up PostgreSQL database**
+   ```bash
+   # Install PostgreSQL (if not already installed)
+   # macOS: brew install postgresql
+   # Ubuntu: sudo apt install postgresql
+   
+   # Create database
+   createdb job_alerts
+   ```
+
+5. **Set up environment variables**
    Create a `.env` file in the project root:
    ```env
    TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
+   
+   # PostgreSQL Database Configuration
+   # Option 1: Use DATABASE_URL (recommended for cloud deployments)
+   # DATABASE_URL=postgres://user:password@host:5432/job_alerts
+   
+   # Option 2: Use individual environment variables
+   POSTGRES_HOST=localhost
+   POSTGRES_PORT=5432
+   POSTGRES_DB=job_alerts
+   POSTGRES_USER=postgres
+   POSTGRES_PASSWORD=your_password
    
    # Optional: Override database connection pool size (auto-calculated by default)
    # DB_POOL_SIZE=20
    ```
 
-5. **Run the bot**
+6. **Migrate existing data (if upgrading from SQLite)**
+   ```bash
+   python migrate_to_postgres.py
+   ```
+
+7. **Run the bot**
    ```bash
    python bot.py
    ```
@@ -97,6 +123,7 @@ Just click the link or search for `@JobQuestTG_Bot` in Telegram and send `/start
 - `python-dotenv==1.1.1` - Environment variable management
 - `cachetools==4.2.2` - LRU cache implementation
 - `tornado==6.1` - Web framework and asynchronous networking
+- `psycopg2-binary==2.9.10` - PostgreSQL database adapter
 
 ### AI & Machine Learning
 - `scikit-learn==1.7.1` - Machine learning algorithms
@@ -150,7 +177,7 @@ Just click the link or search for `@JobQuestTG_Bot` in Telegram and send `/start
 - **Job Scraper**: LinkedIn job listing extraction
 - **Relevance Engine**: AI-powered job matching
 - **Alert System**: Automated job monitoring
-- **Database**: SQLite for user preferences and alerts
+- **Database**: PostgreSQL with connection pooling for high performance
 - **Scheduler**: Background task management
 
 ### AI Matching System
@@ -166,19 +193,36 @@ Just click the link or search for `@JobQuestTG_Bot` in Telegram and send `/start
 # Required
 TELEGRAM_BOT_TOKEN=your_bot_token
 
+# PostgreSQL Database (one of these options required)
+# Option 1: DATABASE_URL (recommended for cloud/Heroku deployments)
+DATABASE_URL=postgres://user:password@host:5432/job_alerts
+
+# Option 2: Individual variables
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=job_alerts
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=your_password
+
 # Optional
 DB_POOL_SIZE=20  # Database connection pool size (auto-calculated if not set)
-                 # Formula: 10 + (active_alerts * 0.7)
-                 # Default: 10-50 connections based on active alerts
+                 # Formula: 10 + (active_alerts * 0.5)
+                 # Default: 10-30 connections based on active alerts
                  # Fallback: 10 connections if calculation fails
 ```
 
 ### Database
-The bot uses SQLite for storing:
+The bot uses PostgreSQL for storing:
 - User preferences
 - Job alerts
 - Search history
 - Timezone settings
+
+PostgreSQL provides:
+- Better concurrency and performance
+- Connection pooling for efficient resource usage
+- ACID compliance for data integrity
+- Better handling of concurrent alert checks
 
 ### Scheduling
 - Alert checks: Every 30 minutes
