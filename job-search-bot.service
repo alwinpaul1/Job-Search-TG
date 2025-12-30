@@ -1,0 +1,77 @@
+# =============================================================================
+# JobQuestTG Bot - Systemd Service File
+# =============================================================================
+# 
+# Installation Instructions:
+# 1. Copy this file to /etc/systemd/system/:
+#    sudo cp jobquest-bot.service /etc/systemd/system/job-search-bot.service
+#
+# 2. Make run_bot.sh executable:
+#    chmod +x /root/Job-Search-TG/run_bot.sh
+#
+# 3. Reload systemd:
+#    sudo systemctl daemon-reload
+#
+# 4. Enable and start the service:
+#    sudo systemctl enable job-search-bot
+#    sudo systemctl start job-search-bot
+#
+# 5. Check status:
+#    sudo systemctl status job-search-bot
+#    sudo journalctl -u job-search-bot -f
+#
+# =============================================================================
+
+[Unit]
+Description=Job Search Telegram Bot
+Documentation=https://github.com/alwinpaul1/Job-Search-TG
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Run as root (adjust if using different user)
+User=root
+Group=root
+
+# Working directory
+WorkingDirectory=/root/Job-Search-TG
+
+# Use the wrapper script for auto-restart and memory monitoring
+# The wrapper script handles its own restart logic
+ExecStart=/root/Job-Search-TG/run_bot.sh start
+ExecStop=/root/Job-Search-TG/run_bot.sh stop
+
+# Restart configuration - let systemd also handle restarts as backup
+Restart=on-failure
+RestartSec=10
+
+# Memory limits handled by run_bot.sh wrapper script
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Logging - use journal for system integration
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=job-search-bot
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=HOME=/root
+
+# Note: WatchdogSec removed - our wrapper script handles its own health monitoring
+# The wrapper does memory checks and log activity monitoring internally
+
+# Kill settings
+TimeoutStartSec=60
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
+
