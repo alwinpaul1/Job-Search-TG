@@ -29,10 +29,10 @@ fi
 LOG_FILE="$SCRIPT_DIR/bot_wrapper.log"
 PID_FILE="$SCRIPT_DIR/bot.pid"
 
-# Memory thresholds (three-tier system)
-MEMORY_WARNING_MB=2200   # Warning threshold - wait and re-check (3 times)
-MEMORY_CRITICAL_MB=2800  # Critical threshold - quick re-check (1 time, 15s)
-MEMORY_EXTREME_MB=3200   # Extreme threshold - immediate restart (no wait, OOM imminent)
+# Memory thresholds (three-tier system) - configured for 8GB RAM
+MEMORY_WARNING_MB=4000   # Warning threshold - wait and re-check (3 times)
+MEMORY_CRITICAL_MB=5500  # Critical threshold - quick re-check (1 time, 15s)
+MEMORY_EXTREME_MB=6500   # Extreme threshold - immediate restart (no wait, OOM imminent)
 MEMORY_CHECK_RETRIES=3   # Number of re-checks at warning level
 MEMORY_CHECK_WAIT=60     # Seconds to wait between re-checks at warning level
 MEMORY_CRITICAL_WAIT=15  # Seconds to wait for critical re-check (quick)
