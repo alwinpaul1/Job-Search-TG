@@ -6063,7 +6063,7 @@ def check_single_alert(alert, bot: Bot):
                 """, cache_data)
 
         cursor.execute(
-            "UPDATE alerts SET last_checked = NOW() WHERE id = %s",
+            "UPDATE alerts SET last_checked = (NOW() AT TIME ZONE 'UTC') WHERE id = %s",
             (alert["id"],)
         )
         conn.commit()
