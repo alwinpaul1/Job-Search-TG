@@ -6247,8 +6247,9 @@ def main():
                 # Skip if memory is too high
                 if current_memory > MAX_MEMORY_MB:
                     logger.warning(f"⚠️ Skipping alert check due to high memory: {current_memory:.1f} MB")
-                    with memory_cleanup_lock:
-                        force_memory_cleanup()
+                    # Don't acquire memory_cleanup_lock here - we hold scheduler_lock
+                    # This prevents potential deadlock
+                    force_memory_cleanup()
                     return
                 
                 # Run the actual alert check
@@ -6278,9 +6279,9 @@ def main():
                         return
                 
                 # Cleanup after alert check
-                with memory_cleanup_lock:
-                    force_memory_cleanup()
-                
+                # Don't acquire memory_cleanup_lock here - we hold scheduler_lock
+                force_memory_cleanup()
+
                 # Unload model if needed
                 if should_unload_model():
                     unload_jobbert_model()
@@ -6289,8 +6290,8 @@ def main():
             logger.error(f"❌ Memory-aware alert check failed: {e}", exc_info=True)
             logger.error(f"🔍 Alert check failed after {time.time() - start_time:.1f}s")
             try:
-                with memory_cleanup_lock:
-                    force_memory_cleanup()
+                # Don't acquire memory_cleanup_lock - just run cleanup directly
+                force_memory_cleanup()
                 # Attempt deadlock recovery
                 lock_status = model_lock.get_status()
                 if lock_status.get('locked'):
@@ -6466,10 +6467,10 @@ def main():
                                 if _global_jobbert_model is not None:
                                     unload_jobbert_model()
                                     logger.info("✅ Emergency model unload completed")
-                                
-                                with memory_cleanup_lock:
-                                    force_memory_cleanup()
-                                    logger.info("✅ Emergency cleanup completed")
+
+                                # Don't acquire memory_cleanup_lock - run cleanup directly to avoid deadlock
+                                force_memory_cleanup()
+                                logger.info("✅ Emergency cleanup completed")
                             except Exception as emergency_e:
                                 logger.critical(f"❌ Emergency measures failed: {emergency_e}")
                 else:
@@ -6480,8 +6481,8 @@ def main():
             # This is critical - if heartbeat fails, something is very wrong
             try:
                 logger.critical("🆘 SYSTEM HEALTH CHECK FAILED - POTENTIAL CRASH IMMINENT")
-                with memory_cleanup_lock:
-                    force_memory_cleanup()
+                # Don't acquire memory_cleanup_lock - run cleanup directly to avoid deadlock
+                force_memory_cleanup()
             except Exception as critical_e:
                 logger.critical(f"🆘 CRITICAL CLEANUP FAILED: {critical_e}")
                 # Last resort - request shutdown
