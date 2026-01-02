@@ -3036,8 +3036,9 @@ def unload_jobbert_model():
                 _global_jobbert_model = None  # Set to None anyway
             
             try:
-                with memory_cleanup_lock:
-                    force_memory_cleanup()
+                # Don't acquire memory_cleanup_lock here - we already hold model_lock
+                # This prevents deadlock with threads holding memory_cleanup_lock waiting for model_lock
+                force_memory_cleanup()
                 logger.info(f"✅ JobBERT model unloaded. Memory usage: {get_memory_usage():.1f} MB")
             except Exception as cleanup_error:
                 logger.error(f"⚠️ Cleanup after unload failed: {cleanup_error}")
@@ -3202,10 +3203,11 @@ def get_jobbert_model():
                 logger.info(f"🔍 [DIAG] Memory check complete, current_memory={current_memory:.1f} MB")
 
                 if current_memory > 800:  # Cleanup if using more than 800MB
-                    logger.info(f"🔍 [DIAG] Memory > 800MB, attempting cleanup with memory_cleanup_lock...")
+                    logger.info(f"🔍 [DIAG] Memory > 800MB, running cleanup WITHOUT acquiring memory_cleanup_lock (already have model_lock)")
                     cleanup_start = time.time()
-                    with memory_cleanup_lock:
-                        force_memory_cleanup()
+                    # Don't acquire memory_cleanup_lock here - we already hold model_lock
+                    # This prevents deadlock with threads holding memory_cleanup_lock waiting for model_lock
+                    force_memory_cleanup()
                     logger.info(f"🔍 [DIAG] Memory cleanup completed in {time.time() - cleanup_start:.3f} seconds")
                     current_memory = get_memory_usage()  # Re-check after cleanup
 
