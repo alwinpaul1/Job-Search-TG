@@ -180,12 +180,26 @@ class DeadlockDetectableLock:
         logger.warning(f"🆘 FORCE RELEASING lock '{self._name}' - potential deadlock recovery")
         with self._meta_lock:
             old_holder = self._holder
+            old_count = self._lock_count
             self._holder = None
             self._holder_time = None
             self._lock_count = 0
-            logger.critical(f"🔓 Force released lock previously held by: {old_holder}")
-        # Create a new lock to ensure clean state
-        self._lock = threading.RLock()
+            logger.critical(f"🔓 Force released lock previously held by: {old_holder} (count was: {old_count})")
+
+        # Release the RLock the correct number of times instead of replacing it
+        # This ensures waiting threads can acquire the lock
+        try:
+            for _ in range(max(old_count, 1)):
+                try:
+                    self._lock.release()
+                except RuntimeError:
+                    # Lock wasn't held, that's fine
+                    break
+        except Exception as e:
+            logger.error(f"❌ Error during force release: {e}")
+            # Last resort: create new lock but log warning about orphaned threads
+            logger.critical(f"⚠️ Creating new lock - any waiting threads will be orphaned!")
+            self._lock = threading.RLock()
     
     def get_status(self):
         """Get current lock status for monitoring"""
@@ -3088,7 +3102,19 @@ def get_jobbert_model():
     import threading
 
     current_thread = threading.current_thread().name
-    logger.info(f"🔍 [DIAG] get_jobbert_model() called by thread: {current_thread}")
+
+    # FAST PATH: If model is already loaded, return immediately without lock contention
+    # This dramatically reduces lock contention when model is already available
+    if _global_jobbert_model is not None and not should_unload_model():
+        _model_last_used = time.time()
+        _model_usage_count += 1
+        if _model_usage_count % 10 == 0:
+            logger.info(f"📊 Model usage: {_model_usage_count} times, Memory: {get_memory_usage():.1f} MB")
+        logger.debug(f"🚀 [FAST PATH] Model already loaded, returning immediately for thread: {current_thread}")
+        return _global_jobbert_model
+
+    # SLOW PATH: Need to load/reload the model - acquire lock
+    logger.info(f"🔍 [DIAG] get_jobbert_model() slow path called by thread: {current_thread}")
     logger.info(f"🔍 [DIAG] Current model state: _global_jobbert_model={'loaded' if _global_jobbert_model else 'None'}, _model_load_attempted={_model_load_attempted}")
 
     # Check lock status before attempting to acquire
@@ -3112,7 +3138,7 @@ def get_jobbert_model():
     lock_acquired = False
 
     while retry_count < max_retries and not lock_acquired:
-        lock_acquired = model_lock.acquire(timeout=90)  # 90 second timeout per attempt
+        lock_acquired = model_lock.acquire(timeout=60)  # Reduced from 90s to 60s per attempt
 
         if not lock_acquired:
             retry_count += 1
@@ -3120,8 +3146,8 @@ def get_jobbert_model():
             logger.warning(f"⚠️ Failed to acquire model_lock (attempt {retry_count}/{max_retries}, elapsed={elapsed:.1f}s)")
 
             if retry_count < max_retries:
-                logger.info(f"🔄 Retrying lock acquisition in 3 seconds...")
-                time.sleep(3)
+                logger.info(f"🔄 Retrying lock acquisition in 2 seconds...")
+                time.sleep(2)  # Reduced from 3s to 2s
             else:
                 logger.error(f"🚨 [CRITICAL] Failed to acquire model_lock after {max_retries} attempts ({elapsed:.1f}s total)")
                 logger.error(f"🔍 [DIAG] Possible deadlock detected. Attempting force recovery...")
@@ -3142,6 +3168,13 @@ def get_jobbert_model():
     try:
         lock_acquired_time = time.time()
         logger.info(f"🔍 [DIAG] model_lock acquired in {lock_acquired_time - lock_start_time:.3f} seconds")
+
+        # Double-check: another thread may have loaded the model while we waited for the lock
+        if _global_jobbert_model is not None and not should_unload_model():
+            logger.info(f"🔍 [DIAG] Model was loaded by another thread while waiting, returning immediately")
+            _model_last_used = time.time()
+            _model_usage_count += 1
+            return _global_jobbert_model
 
         # Check if we should unload the model first
         if _global_jobbert_model is not None and should_unload_model():
@@ -6345,9 +6378,9 @@ def main():
                         except Exception as e:
                             logger.critical(f"❌ Failed to release lock: {e}")
                     
-                    # If scheduler is stuck for over 2 hours, trigger restart
-                    if time_since_alert > 7200 and AUTO_RESTART_ON_CRITICAL:
-                        logger.critical("🔄 Scheduler stuck for over 2 hours - triggering restart!")
+                    # If scheduler is stuck for over 1 hour, trigger restart (reduced from 2 hours)
+                    if time_since_alert > 3600 and AUTO_RESTART_ON_CRITICAL:
+                        logger.critical("🔄 Scheduler stuck for over 1 hour - triggering restart!")
                         trigger_self_restart()
                         return
                         
