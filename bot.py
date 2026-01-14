@@ -556,16 +556,40 @@ class DatabasePool:
         finally:
             self.resize_lock.release()
         
+    def _is_connection_alive(self, conn):
+        """Check if a connection is still valid."""
+        try:
+            if conn.closed:
+                return False
+            # Quick query to test the connection
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            cursor.close()
+            return True
+        except Exception:
+            return False
+    
     def get_connection(self):
         """Get a connection from the pool or create a new one."""
         # Periodically check if resize is needed
         self._maybe_resize()
         
         with self.pool_lock:
-            # Try to get from pool first
-            if self.pool:
-                self.checked_out += 1
-                return self.pool.pop()
+            # Try to get from pool first, validating connections
+            while self.pool:
+                conn = self.pool.pop()
+                if self._is_connection_alive(conn):
+                    self.checked_out += 1
+                    return conn
+                else:
+                    # Connection is dead, close it and try next
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    if self.active_connections > 0:
+                        self.active_connections -= 1
+                    logger.debug("🔄 Discarded stale connection from pool")
             
             # Create new connection if under limit
             if self.active_connections < self.max_connections:
@@ -614,7 +638,7 @@ class DatabasePool:
                         self.active_connections -= 1
     
     def _create_connection(self):
-        """Create a new database connection."""
+        """Create a new database connection with keepalive settings."""
         conn = psycopg2.connect(
             host=DB_CONFIG["host"],
             port=DB_CONFIG["port"],
@@ -622,7 +646,12 @@ class DatabasePool:
             user=DB_CONFIG["user"],
             password=DB_CONFIG["password"],
             connect_timeout=10,
-            options="-c statement_timeout=30000"  # 30 second query timeout
+            options="-c statement_timeout=30000",  # 30 second query timeout
+            # TCP keepalive settings to detect dead connections faster
+            keepalives=1,
+            keepalives_idle=30,      # Start keepalive probes after 30s idle
+            keepalives_interval=10,  # Send keepalive every 10s
+            keepalives_count=3       # Close after 3 failed probes
         )
         # Use RealDictCursor for dict-like row access
         conn.cursor_factory = psycopg2.extras.RealDictCursor
