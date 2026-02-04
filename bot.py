@@ -1737,15 +1737,22 @@ def save_job_callback(update: Update, context: CallbackContext):
     query.answer("💾 Saving job...")
 
     chat_id = query.from_user.id
+    callback_data = query.data
+    
+    # DEBUG logging
+    logger.info(f"[SAVE_DEBUG] Callback received: {callback_data} from chat_id: {chat_id}")
 
     # Parse callback data: save_job_<alert_id>_<job_id>
-    parts = query.data.split("_", 3)
+    parts = callback_data.split("_", 3)
     if len(parts) < 4:
+        logger.error(f"[SAVE_DEBUG] Invalid callback format: {callback_data}")
         query.answer("❌ Error saving job")
         return
 
     alert_id = parts[2]
     job_id = parts[3]
+    
+    logger.info(f"[SAVE_DEBUG] Parsed alert_id={alert_id}, job_id={job_id}")
 
     conn = None
     try:
@@ -1760,10 +1767,27 @@ def save_job_callback(update: Update, context: CallbackContext):
             (alert_id, job_id)
         )
         job_data = cursor.fetchone()
+        
+        logger.info(f"[SAVE_DEBUG] Cache lookup result: {job_data is not None}")
 
+        # Fallback: if not in cache, try sent_jobs table (for older jobs)
         if not job_data:
-            query.answer("❌ Job not found")
-            return
+            logger.info(f"[SAVE_DEBUG] Trying sent_jobs fallback...")
+            cursor.execute(
+                """SELECT job_link, job_title, company, 
+                   NULL as location, NULL as date_posted
+                   FROM sent_jobs
+                   WHERE alert_id = %s AND job_id = %s AND chat_id = %s""",
+                (alert_id, job_id, chat_id)
+            )
+            job_data = cursor.fetchone()
+            
+            logger.info(f"[SAVE_DEBUG] sent_jobs lookup result: {job_data is not None}")
+            
+            if not job_data:
+                logger.error(f"[SAVE_DEBUG] Job not found in cache or sent_jobs: alert_id={alert_id}, job_id={job_id}")
+                query.answer("❌ Job not found (may have expired)")
+                return
 
         # Get alert details
         cursor.execute(
@@ -1852,9 +1876,18 @@ def unsave_from_alert_callback(update: Update, context: CallbackContext):
         )
         job_data = cursor.fetchone()
 
+        # Fallback: if not in cache, try sent_jobs table (for older jobs)
         if not job_data:
-            query.answer("❌ Job not found")
-            return
+            cursor.execute(
+                """SELECT job_link FROM sent_jobs
+                   WHERE alert_id = %s AND job_id = %s AND chat_id = %s""",
+                (alert_id, job_id, chat_id)
+            )
+            job_data = cursor.fetchone()
+            
+            if not job_data:
+                query.answer("❌ Job not found (may have expired)")
+                return
 
         job_link = job_data["job_link"]
 
@@ -6068,6 +6101,7 @@ def check_single_alert(alert, bot: Bot):
             )
 
         # Cache job details for saving later (using callback-safe job_id)
+        # MOVED BEFORE sending messages to fix race condition
         job_cache_data = []
         for job in jobs_to_send:
             job_cache_data.append((
@@ -6090,6 +6124,9 @@ def check_single_alert(alert, bot: Bot):
                         date_posted = EXCLUDED.date_posted,
                         cached_at = NOW()
                 """, cache_data)
+        
+        # Commit cache BEFORE sending messages to ensure it's available for save button
+        conn.commit()
 
         cursor.execute(
             "UPDATE alerts SET last_checked = (NOW() AT TIME ZONE 'UTC') WHERE id = %s",
