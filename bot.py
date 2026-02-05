@@ -98,6 +98,7 @@ from telegram.ext import (
     CommandHandler,
     ConversationHandler,
     MessageHandler,
+    PicklePersistence,
     Updater,
 )
 
@@ -6615,7 +6616,9 @@ def main():
         logger.error(f"Failed to start scheduler: {e}")
         return
 
-    updater = Updater(token, use_context=True)
+    # Persist conversation states across restarts
+    persistence = PicklePersistence(filename="/root/Job-Search-TG/conversation_states.pickle")
+    updater = Updater(token, use_context=True, persistence=persistence)
     dispatcher = updater.dispatcher
 
     def error_handler(update, context):
@@ -6646,6 +6649,8 @@ def main():
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
+        name="main_conversation",
+        persistent=True,
         states={
             MAIN_MENU: [
                 CallbackQueryHandler(preferences_menu, pattern="^prefs$"),
@@ -6845,6 +6850,12 @@ def main():
         allow_reentry=True,
     )
     dispatcher.add_handler(conv_handler)
+
+    # Add standalone save/unsave handlers outside ConversationHandler
+    # This fixes the issue where callbacks are dropped when user has no active
+    # conversation state (e.g., after bot restart without persistence)
+    dispatcher.add_handler(CallbackQueryHandler(save_job_callback, pattern="^save_job_"), group=1)
+    dispatcher.add_handler(CallbackQueryHandler(unsave_from_alert_callback, pattern="^unsave_from_alert_"), group=1)
 
     # Add admin command handlers
     dispatcher.add_handler(CommandHandler("stats", admin_stats))
