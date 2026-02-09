@@ -5645,17 +5645,11 @@ def update_alert_baseline_threaded(
         )
 
         cursor.execute(
-            "SELECT job_id, canonical_title, canonical_company, "
-            "COALESCE(canonical_location, '') as canonical_location "
-            "FROM sent_jobs WHERE chat_id = %s",
+            "SELECT job_id FROM sent_jobs WHERE chat_id = %s",
             (chat_id,)
         )
         sent_jobs = cursor.fetchall()
         sent_job_ids = {row["job_id"] for row in sent_jobs}
-        sent_canonical_pairs = {
-            (row["canonical_title"], row["canonical_company"], row["canonical_location"])
-            for row in sent_jobs
-        }
 
         new_jobs_to_insert = []
         for job in baseline_jobs:
@@ -5665,10 +5659,7 @@ def update_alert_baseline_threaded(
 
             canonical_location = canonical_text(job.get("Location", ""))
 
-            is_duplicate = (
-                job_id in sent_job_ids or
-                (canonical_title, canonical_company, canonical_location) in sent_canonical_pairs
-            )
+            is_duplicate = job_id in sent_job_ids
 
             if not is_duplicate:
                 new_jobs_to_insert.append(
@@ -6011,14 +6002,12 @@ def check_single_alert(alert, bot: Bot):
             canonical_company = canonical_text(job["Company"])
             canonical_location = canonical_text(job.get("Location", ""))
 
-            # Check for duplicates directly in the database to save memory
+            # Check for duplicates by job_id only (reposts get new IDs, so they come through)
             cursor.execute(
                 """SELECT 1 FROM sent_jobs WHERE
-                   (chat_id = %s AND job_id = %s) OR
-                   (chat_id = %s AND canonical_title = %s AND canonical_company = %s
-                    AND COALESCE(canonical_location, '') = %s)
+                   chat_id = %s AND job_id = %s
                    LIMIT 1""",
-                (alert["chat_id"], job_id, alert["chat_id"], canonical_title, canonical_company, canonical_location)
+                (alert["chat_id"], job_id)
             )
             is_duplicate = cursor.fetchone() is not None
 
