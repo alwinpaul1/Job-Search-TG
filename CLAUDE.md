@@ -54,16 +54,16 @@ PostgreSQL (`job_alerts` database, user `jobbot`). Config via `DATABASE_URL` env
 
 ## Dedup System (Critical Path)
 
-Jobs are deduped in `sent_jobs` via two conditions:
-1. **Exact match:** `(chat_id, job_id)` — `job_id` is the numeric LinkedIn ID extracted by `canonical_link()`
-2. **Fuzzy match:** `(chat_id, canonical_title, canonical_company, canonical_location)` — normalized text via `canonical_text()`
+Jobs are deduped in `sent_jobs` by **`job_id` only** — the numeric LinkedIn ID extracted by `canonical_link()`. Each LinkedIn posting has a unique numeric ID, so this is sufficient. When a company closes a listing and reposts the same role, LinkedIn assigns a new ID and the bot correctly treats it as a new job.
+
+**Why not canonical title+company?** That was removed because it blocked legitimate reposts — e.g., Findr closing "AI Engineer" and reposting it with a new LinkedIn ID would be silently blocked by the old fuzzy match. The canonical columns (`canonical_title`, `canonical_company`, `canonical_location`) still exist in the DB for analytics but are **not used for dedup**.
 
 Three code paths insert into `sent_jobs` (all must stay in sync):
 - **Baseline population** (~line 4800): When a new alert is created
 - **Alert-update** (~line 5636): When alert filters are edited
 - **Main alert loop** (~line 6090): When new jobs are found during scheduled checks
 
-The in-memory dedup in alert-update (~line 5610) uses a set of `(title, company, location)` tuples and must match the DB query logic.
+The alert-update path uses an in-memory `sent_job_ids` set; the main alert loop queries the DB directly. Both check `job_id` only.
 
 ## Key Globals & Singletons
 
