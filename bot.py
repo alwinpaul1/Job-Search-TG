@@ -887,6 +887,7 @@ def canonical_link(url: str) -> str:
     # Try multiple patterns to extract LinkedIn job ID
     patterns = [
         r"/jobs/view/(\d+)",  # Standard: /jobs/view/123456
+        r"/jobs/view/[a-z0-9%\-]+-(\d{7,})",  # Slug: /jobs/view/ai-engineer-at-company-4370539449
         r"/jobs/(\d+)/",      # Alternative: /jobs/123456/
         r"job[_-](\d+)",      # Job ID in parameter: job_123456 or job-123456
         r"jobId[=:](\d+)",    # JobId parameter: jobId=123456 or jobId:123456
@@ -1061,6 +1062,7 @@ def init_db():
                 company TEXT NOT NULL,
                 canonical_title TEXT NOT NULL,
                 canonical_company TEXT NOT NULL,
+                canonical_location TEXT NOT NULL DEFAULT '',
                 sent_at TIMESTAMP DEFAULT NOW(),
                 PRIMARY KEY (alert_id, job_link),
                 FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
@@ -1140,6 +1142,7 @@ def init_db():
             ("job_id", "TEXT NOT NULL DEFAULT ''"),
             ("canonical_title", "TEXT NOT NULL DEFAULT ''"),
             ("canonical_company", "TEXT NOT NULL DEFAULT ''"),
+            ("canonical_location", "TEXT NOT NULL DEFAULT ''"),
             ("sent_at", "TIMESTAMP"),
         ]
 
@@ -1151,6 +1154,8 @@ def init_db():
             except psycopg2.Error as e:
                 conn.rollback()
                 logger.warning(f"Failed to add {col_name}: {e}")
+
+        conn.commit()  # Persist column additions before backfill
 
         # Migrate existing data to new format
         try:
@@ -1184,9 +1189,39 @@ def init_db():
             """)
 
             logger.info("Migrated existing sent_jobs data to new format")
+            conn.commit()
         except Exception as e:
             conn.rollback()
             logger.warning(f"Migration warning (non-critical): {e}")
+
+        # Backfill: extract numeric IDs from full-URL job_id values
+        try:
+            cursor.execute(r"""
+                WITH candidates AS (
+                    SELECT ctid, alert_id, job_id,
+                           substring(job_id from '.*-(\d{7,})$') as numeric_id
+                    FROM sent_jobs
+                    WHERE job_id ~ '.*-\d{7,}$' AND length(job_id) > 20
+                ),
+                unique_ids AS (
+                    SELECT numeric_id, alert_id
+                    FROM candidates
+                    GROUP BY numeric_id, alert_id
+                    HAVING count(*) = 1
+                )
+                UPDATE sent_jobs s
+                SET job_id = substring(s.job_id from '.*-(\d{7,})$')
+                FROM unique_ids u
+                WHERE s.alert_id = u.alert_id
+                AND substring(s.job_id from '.*-(\d{7,})$') = u.numeric_id
+                AND s.job_id ~ '.*-\d{7,}$' AND length(s.job_id) > 20
+            """)
+            backfilled = cursor.rowcount
+            if backfilled > 0:
+                logger.info(f"Backfilled {backfilled} job_id entries to numeric IDs")
+        except Exception as e:
+            conn.rollback()
+            logger.warning(f"Job ID backfill warning (non-critical): {e}")
 
         # Create indexes for efficient deduplication
         try:
@@ -1198,9 +1233,10 @@ def init_db():
                 "CREATE INDEX IF NOT EXISTS idx_chat_jobid "
                 "ON sent_jobs(chat_id, job_id)"
             )
+            cursor.execute("DROP INDEX IF EXISTS idx_canonical")
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_canonical "
-                "ON sent_jobs(chat_id, canonical_title, canonical_company)"
+                "ON sent_jobs(chat_id, canonical_title, canonical_company, canonical_location)"
             )
             # Additional performance indexes for PostgreSQL
             cursor.execute(
@@ -4796,15 +4832,17 @@ def setup_alert_threaded(query, context, keywords, location, prefs):
             job_id = canonical_link(job["Link"])
             canonical_title = canonical_text(job["Title"])
             canonical_company = canonical_text(job["Company"])
+            canonical_location = canonical_text(job.get("Location", ""))
             cursor.execute("""
                 INSERT INTO sent_jobs
                 (alert_id, chat_id, job_link, job_id, job_title, company,
-                 canonical_title, canonical_company, sent_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                 canonical_title, canonical_company, canonical_location, sent_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                 ON CONFLICT (alert_id, job_link) DO NOTHING
             """, (
                 alert_id, chat_id, job["Link"], job_id, job["Title"],
-                job["Company"], canonical_title, canonical_company
+                job["Company"], canonical_title, canonical_company,
+                canonical_location
             ))
         conn.commit()
 
@@ -5607,14 +5645,15 @@ def update_alert_baseline_threaded(
         )
 
         cursor.execute(
-            "SELECT job_id, canonical_title, canonical_company "
+            "SELECT job_id, canonical_title, canonical_company, "
+            "COALESCE(canonical_location, '') as canonical_location "
             "FROM sent_jobs WHERE chat_id = %s",
             (chat_id,)
         )
         sent_jobs = cursor.fetchall()
         sent_job_ids = {row["job_id"] for row in sent_jobs}
         sent_canonical_pairs = {
-            (row["canonical_title"], row["canonical_company"])
+            (row["canonical_title"], row["canonical_company"], row["canonical_location"])
             for row in sent_jobs
         }
 
@@ -5624,9 +5663,11 @@ def update_alert_baseline_threaded(
             canonical_title = canonical_text(job["Title"])
             canonical_company = canonical_text(job["Company"])
 
+            canonical_location = canonical_text(job.get("Location", ""))
+
             is_duplicate = (
                 job_id in sent_job_ids or
-                (canonical_title, canonical_company) in sent_canonical_pairs
+                (canonical_title, canonical_company, canonical_location) in sent_canonical_pairs
             )
 
             if not is_duplicate:
@@ -5634,7 +5675,7 @@ def update_alert_baseline_threaded(
                     (
                         alert_id, chat_id, job["Link"], job_id,
                         job["Title"], job["Company"], canonical_title,
-                        canonical_company
+                        canonical_company, canonical_location
                     )
                 )
 
@@ -5643,8 +5684,9 @@ def update_alert_baseline_threaded(
                 cursor.execute("""
                     INSERT INTO sent_jobs
                     (alert_id, chat_id, job_link, job_id, job_title,
-                     company, canonical_title, canonical_company, sent_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                     company, canonical_title, canonical_company,
+                     canonical_location, sent_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                     ON CONFLICT (alert_id, job_link) DO NOTHING
                 """, job_data)
             conn.commit()
@@ -5967,14 +6009,16 @@ def check_single_alert(alert, bot: Bot):
             job_id = canonical_link(job["Link"])
             canonical_title = canonical_text(job["Title"])
             canonical_company = canonical_text(job["Company"])
+            canonical_location = canonical_text(job.get("Location", ""))
 
             # Check for duplicates directly in the database to save memory
             cursor.execute(
                 """SELECT 1 FROM sent_jobs WHERE
                    (chat_id = %s AND job_id = %s) OR
-                   (chat_id = %s AND canonical_title = %s AND canonical_company = %s)
+                   (chat_id = %s AND canonical_title = %s AND canonical_company = %s
+                    AND COALESCE(canonical_location, '') = %s)
                    LIMIT 1""",
-                (alert["chat_id"], job_id, alert["chat_id"], canonical_title, canonical_company)
+                (alert["chat_id"], job_id, alert["chat_id"], canonical_title, canonical_company, canonical_location)
             )
             is_duplicate = cursor.fetchone() is not None
 
@@ -6001,7 +6045,8 @@ def check_single_alert(alert, bot: Bot):
                     **job,
                     "_job_id": job_id,
                     "_canonical_title": canonical_title,
-                    "_canonical_company": canonical_company
+                    "_canonical_company": canonical_company,
+                    "_canonical_location": canonical_location
                 }
                 jobs_to_send.append(job_with_meta)
 
@@ -6072,7 +6117,8 @@ def check_single_alert(alert, bot: Bot):
                     (
                         alert["id"], alert["chat_id"], job["Link"],
                         job["_job_id"], job["Title"], job["Company"],
-                        job["_canonical_title"], job["_canonical_company"]
+                        job["_canonical_title"], job["_canonical_company"],
+                        job["_canonical_location"]
                     )
                 )
 
@@ -6092,8 +6138,9 @@ def check_single_alert(alert, bot: Bot):
                 cursor.execute("""
                     INSERT INTO sent_jobs
                     (alert_id, chat_id, job_link, job_id, job_title,
-                     company, canonical_title, canonical_company, sent_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                     company, canonical_title, canonical_company,
+                     canonical_location, sent_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                     ON CONFLICT (alert_id, job_link) DO NOTHING
                 """, job_data)
             logger.info(
