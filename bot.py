@@ -1002,6 +1002,10 @@ def safe_edit_message(
     GET_LOCATION, SAVED_JOBS,
 ) = range(19)
 
+# Admin panel states (separate ConversationHandler, group=2)
+(ADMIN_MENU, ADMIN_USER_ALERTS, ADMIN_ALERT_DETAILS) = range(100, 103)
+ADMIN_USERS_PER_PAGE = 10
+
 JOBS_PER_PAGE = 5
 MAX_SCRAPE_PAGES = 5
 
@@ -2146,6 +2150,379 @@ def admin_stats(update: Update, context: CallbackContext):
     finally:
         if conn:
             db_pool.return_connection(conn)
+
+
+# --- Admin Panel Functions ---
+
+def admin_command(update: Update, context: CallbackContext):
+    """Entry point for /admin — show paginated user list."""
+    if update.effective_user.id != ADMIN_USER_ID:
+        update.message.reply_text("⛔ This command is only available to the bot administrator.")
+        return ConversationHandler.END
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(DISTINCT chat_id) FROM alerts")
+        total_users = cursor.fetchone()["count"]
+
+        cursor.execute("""
+            SELECT chat_id, COUNT(*) AS alert_count,
+                   SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) AS active_count
+            FROM alerts GROUP BY chat_id ORDER BY alert_count DESC
+            LIMIT %s OFFSET 0
+        """, (ADMIN_USERS_PER_PAGE,))
+        users = cursor.fetchall()
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
+
+    text = f"👑 *Admin Panel*\n\n👥 Users with alerts: {total_users}\n\nSelect a user:"
+    keyboard = []
+    for u in users:
+        cid = u["chat_id"]
+        total = u["alert_count"]
+        active = u["active_count"] or 0
+        keyboard.append([InlineKeyboardButton(
+            f"🆔 {cid} — {total} alerts ({active} active)",
+            callback_data=f"adm_user_{cid}"
+        )])
+
+    nav_row = []
+    if total_users > ADMIN_USERS_PER_PAGE:
+        nav_row.append(InlineKeyboardButton("Next ▶️", callback_data=f"adm_upage_{ADMIN_USERS_PER_PAGE}"))
+    if nav_row:
+        keyboard.append(nav_row)
+    keyboard.append([InlineKeyboardButton("❌ Close", callback_data="adm_cancel")])
+
+    update.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return ADMIN_MENU
+
+
+def admin_user_list(update: Update, context: CallbackContext):
+    """Callback handler for adm_users and adm_upage_{offset}."""
+    query = update.callback_query
+    if update.effective_user.id != ADMIN_USER_ID:
+        return ConversationHandler.END
+    safe_answer_callback_query(query)
+
+    offset = 0
+    if query.data.startswith("adm_upage_"):
+        offset = int(query.data.split("_")[-1])
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(DISTINCT chat_id) FROM alerts")
+        total_users = cursor.fetchone()["count"]
+
+        cursor.execute("""
+            SELECT chat_id, COUNT(*) AS alert_count,
+                   SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) AS active_count
+            FROM alerts GROUP BY chat_id ORDER BY alert_count DESC
+            LIMIT %s OFFSET %s
+        """, (ADMIN_USERS_PER_PAGE, offset))
+        users = cursor.fetchall()
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
+
+    page_num = offset // ADMIN_USERS_PER_PAGE + 1
+    total_pages = (total_users + ADMIN_USERS_PER_PAGE - 1) // ADMIN_USERS_PER_PAGE
+    text = f"👑 *Admin Panel*\n\n👥 Users with alerts: {total_users} (page {page_num}/{total_pages})\n\nSelect a user:"
+
+    keyboard = []
+    for u in users:
+        cid = u["chat_id"]
+        total = u["alert_count"]
+        active = u["active_count"] or 0
+        keyboard.append([InlineKeyboardButton(
+            f"🆔 {cid} — {total} alerts ({active} active)",
+            callback_data=f"adm_user_{cid}"
+        )])
+
+    nav_row = []
+    if offset > 0:
+        nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data=f"adm_upage_{max(0, offset - ADMIN_USERS_PER_PAGE)}"))
+    if offset + ADMIN_USERS_PER_PAGE < total_users:
+        nav_row.append(InlineKeyboardButton("Next ▶️", callback_data=f"adm_upage_{offset + ADMIN_USERS_PER_PAGE}"))
+    if nav_row:
+        keyboard.append(nav_row)
+    keyboard.append([InlineKeyboardButton("❌ Close", callback_data="adm_cancel")])
+
+    try:
+        query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except telegram.error.BadRequest as e:
+        if "message is not modified" not in str(e).lower():
+            raise
+    return ADMIN_MENU
+
+
+def admin_view_user_alerts(update: Update, context: CallbackContext):
+    """Show all alerts for a specific user."""
+    query = update.callback_query
+    if update.effective_user.id != ADMIN_USER_ID:
+        return ConversationHandler.END
+    safe_answer_callback_query(query)
+
+    # Extract chat_id from adm_user_{chat_id} or adm_back_user_{chat_id}
+    parts = query.data.split("_")
+    chat_id = int(parts[-1])
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, keywords, location, is_active, last_checked FROM alerts WHERE chat_id = %s ORDER BY id",
+            (chat_id,)
+        )
+        alerts = cursor.fetchall()
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
+
+    if not alerts:
+        text = f"👤 *User {chat_id}*\n\nNo alerts found."
+    else:
+        text = f"👤 *User {chat_id}*\n\n📋 {len(alerts)} alert(s):\n"
+
+    keyboard = []
+    for a in alerts:
+        status_icon = "🟢" if a["is_active"] else "🔴"
+        kw = a["keywords"][:30]
+        loc = a["location"][:20]
+        keyboard.append([InlineKeyboardButton(
+            f"{status_icon} #{a['id']} {kw} • {loc}",
+            callback_data=f"adm_va_{a['id']}"
+        )])
+
+    keyboard.append([InlineKeyboardButton("⬅️ Back to Users", callback_data="adm_users")])
+    keyboard.append([InlineKeyboardButton("❌ Close", callback_data="adm_cancel")])
+
+    try:
+        query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except telegram.error.BadRequest as e:
+        if "message is not modified" not in str(e).lower():
+            raise
+    return ADMIN_USER_ALERTS
+
+
+def admin_view_alert_details(update: Update, context: CallbackContext):
+    """Show full details of an alert with action buttons."""
+    query = update.callback_query
+    if update.effective_user.id != ADMIN_USER_ID:
+        return ConversationHandler.END
+    safe_answer_callback_query(query)
+
+    alert_id = int(query.data.split("_")[-1])
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM alerts WHERE id = %s", (alert_id,))
+        alert = cursor.fetchone()
+
+        if not alert:
+            query.edit_message_text("❌ Alert not found.")
+            return ADMIN_USER_ALERTS
+
+        cursor.execute("SELECT COUNT(*) FROM sent_jobs WHERE alert_id = %s", (alert_id,))
+        sent_count = cursor.fetchone()["count"]
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
+
+    chat_id = alert["chat_id"]
+    status_icon = "🟢" if alert["is_active"] else "🔴"
+    status_text = "Active" if alert["is_active"] else "Paused"
+
+    last_checked_display = "Never"
+    last_checked_val = alert["last_checked"]
+    if last_checked_val:
+        try:
+            if isinstance(last_checked_val, datetime):
+                utc_dt = last_checked_val.replace(tzinfo=pytz.utc) if last_checked_val.tzinfo is None else last_checked_val
+            else:
+                utc_dt = datetime.strptime(str(last_checked_val).split(".")[0], "%Y-%m-%d %H:%M:%S").replace(tzinfo=pytz.utc)
+            last_checked_display = utc_dt.strftime("%Y-%m-%d %H:%M UTC")
+        except (ValueError, pytz.UnknownTimeZoneError):
+            last_checked_display = str(last_checked_val)[:16]
+
+    filters_text = ""
+    if alert["filters"]:
+        try:
+            f = json.loads(alert["filters"])
+            experience = ", ".join(f.get("experience", {}).keys()) or "Any"
+            job_types = ", ".join(f.get("job_types", {}).keys()) or "Any"
+            date_posted = list(f.get("date_posted", {}).keys())[0] if f.get("date_posted") else "Any"
+            workplace = list(f.get("workplace", {}).keys())[0] if f.get("workplace") else "Any"
+            filters_text = (
+                f"\n<b>Filters:</b>\n"
+                f"∙ Date Posted: <code>{html.escape(date_posted)}</code>\n"
+                f"∙ Workplace: <code>{html.escape(workplace)}</code>\n"
+                f"∙ Experience: <code>{html.escape(experience)}</code>\n"
+                f"∙ Job Types: <code>{html.escape(job_types)}</code>\n"
+            )
+        except (json.JSONDecodeError, KeyError):
+            filters_text = "\n<i>Filters: unable to parse</i>\n"
+
+    text = (
+        f"🔔 <b>Alert #{alert_id}</b>\n\n"
+        f"👤 <b>User:</b> <code>{chat_id}</code>\n"
+        f"📝 <b>Keywords:</b> {html.escape(alert['keywords'])}\n"
+        f"📍 <b>Location:</b> {html.escape(alert['location'])}\n"
+        f"📊 <b>Status:</b> {status_icon} {status_text}\n"
+        f"📬 <b>Jobs Sent:</b> {sent_count}\n"
+        f"🕒 <b>Last Checked:</b> {last_checked_display}\n"
+        f"{filters_text}"
+    )
+
+    action_text = "⏸️ Pause" if alert["is_active"] else "▶️ Resume"
+    action_cb = f"adm_pause_{alert_id}" if alert["is_active"] else f"adm_resume_{alert_id}"
+
+    keyboard = [
+        [InlineKeyboardButton(action_text, callback_data=action_cb)],
+        [InlineKeyboardButton("🗑️ Delete", callback_data=f"adm_delstart_{alert_id}")],
+        [InlineKeyboardButton("⬅️ Back to User Alerts", callback_data=f"adm_back_user_{chat_id}")],
+        [InlineKeyboardButton("⬅️ Back to Users", callback_data="adm_users")],
+        [InlineKeyboardButton("❌ Close", callback_data="adm_cancel")],
+    ]
+
+    try:
+        query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.HTML
+        )
+    except telegram.error.BadRequest as e:
+        if "message is not modified" not in str(e).lower():
+            raise
+    return ADMIN_ALERT_DETAILS
+
+
+def admin_toggle_alert(update: Update, context: CallbackContext):
+    """Pause or resume an alert from admin panel."""
+    query = update.callback_query
+    if update.effective_user.id != ADMIN_USER_ID:
+        return ConversationHandler.END
+
+    # adm_pause_{id} or adm_resume_{id}
+    parts = query.data.split("_")
+    action = parts[1]  # "pause" or "resume"
+    alert_id = int(parts[2])
+    new_status = 0 if action == "pause" else 1
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE alerts SET is_active = %s WHERE id = %s", (new_status, alert_id))
+        conn.commit()
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
+
+    query.answer(f"Alert {'paused' if new_status == 0 else 'resumed'}.")
+    # Re-render alert details
+    query.data = f"adm_va_{alert_id}"
+    return admin_view_alert_details(update, context)
+
+
+def admin_delete_alert_start(update: Update, context: CallbackContext):
+    """Show delete confirmation for an alert."""
+    query = update.callback_query
+    if update.effective_user.id != ADMIN_USER_ID:
+        return ConversationHandler.END
+    safe_answer_callback_query(query)
+
+    alert_id = int(query.data.split("_")[-1])
+
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Yes, Delete", callback_data=f"adm_delconf_{alert_id}"),
+            InlineKeyboardButton("❌ No, Cancel", callback_data=f"adm_va_{alert_id}"),
+        ],
+    ]
+
+    try:
+        query.edit_message_text(
+            f"⚠️ Are you sure you want to delete alert #{alert_id} and all its sent job records?",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except telegram.error.BadRequest as e:
+        if "message is not modified" not in str(e).lower():
+            raise
+    return ADMIN_ALERT_DETAILS
+
+
+def admin_delete_alert_confirm(update: Update, context: CallbackContext):
+    """Delete the alert and navigate back to user's alerts."""
+    query = update.callback_query
+    if update.effective_user.id != ADMIN_USER_ID:
+        return ConversationHandler.END
+
+    alert_id = int(query.data.split("_")[-1])
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        # Get chat_id before deleting
+        cursor.execute("SELECT chat_id FROM alerts WHERE id = %s", (alert_id,))
+        row = cursor.fetchone()
+        if not row:
+            query.answer("Alert not found.")
+            return ADMIN_MENU
+        chat_id = row["chat_id"]
+
+        cursor.execute("DELETE FROM sent_jobs WHERE alert_id = %s", (alert_id,))
+        cursor.execute("DELETE FROM alerts WHERE id = %s", (alert_id,))
+        conn.commit()
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
+
+    query.answer("Alert deleted.")
+    # Navigate back to user's alerts
+    query.data = f"adm_back_user_{chat_id}"
+    return admin_view_user_alerts(update, context)
+
+
+def admin_cancel(update: Update, context: CallbackContext):
+    """Close the admin panel via callback."""
+    query = update.callback_query
+    if update.effective_user.id != ADMIN_USER_ID:
+        return ConversationHandler.END
+    safe_answer_callback_query(query)
+    try:
+        query.edit_message_text("👑 Admin panel closed.")
+    except telegram.error.BadRequest:
+        pass
+    return ConversationHandler.END
+
+
+def admin_cancel_command(update: Update, context: CallbackContext):
+    """Close the admin panel via /cancel command."""
+    if update.effective_user.id != ADMIN_USER_ID:
+        return ConversationHandler.END
+    update.message.reply_text("👑 Admin panel closed.")
+    return ConversationHandler.END
 
 
 # --- Search and Preferences Flow ---
@@ -6895,6 +7272,41 @@ def main():
 
     # Add admin command handlers
     dispatcher.add_handler(CommandHandler("stats", admin_stats))
+
+    # Admin panel ConversationHandler (group=2 to avoid interfering with main flow)
+    admin_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("admin", admin_command)],
+        name="admin_conversation",
+        persistent=False,
+        states={
+            ADMIN_MENU: [
+                CallbackQueryHandler(admin_view_user_alerts, pattern=r"^adm_user_\d+$"),
+                CallbackQueryHandler(admin_user_list, pattern=r"^adm_users$"),
+                CallbackQueryHandler(admin_user_list, pattern=r"^adm_upage_\d+$"),
+                CallbackQueryHandler(admin_cancel, pattern=r"^adm_cancel$"),
+            ],
+            ADMIN_USER_ALERTS: [
+                CallbackQueryHandler(admin_view_alert_details, pattern=r"^adm_va_\d+$"),
+                CallbackQueryHandler(admin_user_list, pattern=r"^adm_users$"),
+                CallbackQueryHandler(admin_cancel, pattern=r"^adm_cancel$"),
+            ],
+            ADMIN_ALERT_DETAILS: [
+                CallbackQueryHandler(admin_toggle_alert, pattern=r"^adm_(pause|resume)_\d+$"),
+                CallbackQueryHandler(admin_delete_alert_start, pattern=r"^adm_delstart_\d+$"),
+                CallbackQueryHandler(admin_delete_alert_confirm, pattern=r"^adm_delconf_\d+$"),
+                CallbackQueryHandler(admin_view_alert_details, pattern=r"^adm_va_\d+$"),
+                CallbackQueryHandler(admin_view_user_alerts, pattern=r"^adm_back_user_\d+$"),
+                CallbackQueryHandler(admin_user_list, pattern=r"^adm_users$"),
+                CallbackQueryHandler(admin_cancel, pattern=r"^adm_cancel$"),
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", admin_cancel_command),
+            CommandHandler("admin", admin_command),
+        ],
+        allow_reentry=True,
+    )
+    dispatcher.add_handler(admin_conv_handler, group=2)
 
     logger.info("Bot started polling...")
     logger.info(f"🔧 Auto-restart enabled: {AUTO_RESTART_ON_CRITICAL}")
