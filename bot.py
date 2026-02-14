@@ -7527,6 +7527,41 @@ def main():
     )
     dispatcher.add_handler(admin_conv_handler, group=2)
 
+    # Fallback for stale admin callbacks after restart (conversation state lost)
+    def admin_stale_callback_handler(update: Update, context: CallbackContext):
+        """Re-route stale admin callbacks when conversation state is lost."""
+        query = update.callback_query
+        if update.effective_user.id != ADMIN_USER_ID:
+            return
+        safe_answer_callback_query(query)
+        data = query.data
+        if data.startswith("adm_user_") or data.startswith("adm_back_user_"):
+            return admin_view_user_alerts(update, context)
+        elif data.startswith("adm_va_"):
+            return admin_view_alert_details(update, context)
+        elif data.startswith("adm_users") or data.startswith("adm_upage_"):
+            return admin_user_list(update, context)
+        elif data.startswith("adm_pause_") or data.startswith("adm_resume_"):
+            return admin_toggle_alert(update, context)
+        elif data.startswith("adm_delstart_"):
+            return admin_delete_alert_start(update, context)
+        elif data.startswith("adm_delconf_"):
+            return admin_delete_alert_confirm(update, context)
+        elif data.startswith("adm_deluserstart_"):
+            return admin_delete_user_start(update, context)
+        elif data.startswith("adm_deluserconf_"):
+            return admin_delete_user_confirm(update, context)
+        elif data == "adm_cancel":
+            return admin_cancel(update, context)
+        else:
+            # Unknown adm_ callback, open admin panel fresh
+            return admin_command(update, context)
+
+    dispatcher.add_handler(
+        CallbackQueryHandler(admin_stale_callback_handler, pattern=r"^adm_"),
+        group=2
+    )
+
     logger.info("Bot started polling...")
     logger.info(f"🔧 Auto-restart enabled: {AUTO_RESTART_ON_CRITICAL}")
     logger.info(f"📊 Crash monitor initialized - Status: {crash_monitor.get_health_status()['status']}")
