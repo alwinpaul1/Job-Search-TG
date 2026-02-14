@@ -2395,7 +2395,7 @@ def admin_view_user_alerts(update: Update, context: CallbackContext):
         user_info["username"] if user_info else None,
         chat_id
     )
-    escaped_label = escape_markdown_v1(user_label)
+    escaped_label = escape_markdown(user_label)
     if not alerts:
         text = f"{escaped_label}\n\nNo alerts found."
     else:
