@@ -1,4 +1,4 @@
-# Dependencies - python-telegram-bot 13.15 requires tornado 6.1
+# python-telegram-bot 13.13 (not 13.15) to allow tornado>=6.1 instead of ==6.1
 APScheduler==3.6.3
 beautifulsoup4==4.13.5
 cachetools==4.2.2
@@ -8,14 +8,14 @@ idna==3.10
 lxml==6.0.1
 openai==1.102.0
 python-dotenv==1.1.1
-python-telegram-bot==13.15
+python-telegram-bot==13.13
 pytz==2025.2
 requests==2.32.4
 six==1.17.0
 soupsieve==2.8
-tornado==6.1
+tornado==6.5.4
 tzlocal==5.3.1
-urllib3==1.26.18
+urllib3==2.6.3
 scikit-learn==1.7.1
 sentence-transformers==5.1.0
 numpy==2.3.2
