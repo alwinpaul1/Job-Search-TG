@@ -1256,6 +1256,14 @@ def init_db():
             conn.rollback()
             logger.warning(f"Index creation warning: {e}")
 
+        # Add user identity columns to user_settings for admin panel display
+        try:
+            cursor.execute("ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS first_name TEXT")
+            cursor.execute("ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS username TEXT")
+        except Exception as e:
+            conn.rollback()
+            logger.warning(f"user_settings column addition warning: {e}")
+
         conn.commit()
         logger.info("PostgreSQL database initialized and schema updated successfully.")
     except psycopg2.Error as e:
@@ -1600,6 +1608,65 @@ def make_multi_select_menu(
     return text, InlineKeyboardMarkup(keyboard)
 
 
+# --- User Info Tracking ---
+def upsert_user_info(chat_id, first_name, username):
+    """Store or update user identity info for admin panel display."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO user_settings (chat_id, first_name, username)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (chat_id) DO UPDATE
+            SET first_name = EXCLUDED.first_name, username = EXCLUDED.username
+        """, (chat_id, first_name, username))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Failed to upsert user info: {e}")
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
+
+
+def backfill_user_info(bot):
+    """Fetch Telegram profiles for existing users that don't have names stored yet."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT DISTINCT a.chat_id
+            FROM alerts a
+            LEFT JOIN user_settings us ON a.chat_id = us.chat_id
+            WHERE us.first_name IS NULL
+        """)
+        rows = cursor.fetchall()
+    except Exception as e:
+        logger.error(f"Failed to query users for backfill: {e}")
+        return
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
+
+    if not rows:
+        logger.info("User info backfill: all users already have names stored.")
+        return
+
+    logger.info(f"Backfilling user info for {len(rows)} user(s)...")
+    success = 0
+    for row in rows:
+        chat_id = row["chat_id"]
+        try:
+            chat = bot.get_chat(chat_id)
+            upsert_user_info(chat_id, chat.first_name, chat.username)
+            success += 1
+            time.sleep(0.1)  # Respect Telegram rate limits
+        except Exception as e:
+            logger.warning(f"Could not fetch profile for {chat_id}: {e}")
+    logger.info(f"User info backfill complete: {success}/{len(rows)} users updated.")
+
+
 # --- Start & Main Menu ---
 def start(update: Update, context: CallbackContext):
     # Debounce the /start command
@@ -1608,6 +1675,10 @@ def start(update: Update, context: CallbackContext):
     if now - last_call < 2:
         return None
     context.user_data["last_start_call"] = now
+
+    # Track user identity for admin panel
+    user = update.effective_user
+    upsert_user_info(user.id, user.first_name, user.username)
 
     text, keyboard = make_main_menu(context)
     update.message.reply_text(text, reply_markup=keyboard)
@@ -2154,6 +2225,18 @@ def admin_stats(update: Update, context: CallbackContext):
 
 # --- Admin Panel Functions ---
 
+def _format_user_label(first_name, username, chat_id):
+    """Format a user display label for admin panel buttons/headers."""
+    if first_name and username:
+        return f"👤 {first_name} (@{username})"
+    elif first_name:
+        return f"👤 {first_name}"
+    elif username:
+        return f"👤 @{username}"
+    else:
+        return f"🆔 {chat_id}"
+
+
 def admin_command(update: Update, context: CallbackContext):
     """Entry point for /admin — show paginated user list."""
     if update.effective_user.id != ADMIN_USER_ID:
@@ -2168,9 +2251,13 @@ def admin_command(update: Update, context: CallbackContext):
         total_users = cursor.fetchone()["count"]
 
         cursor.execute("""
-            SELECT chat_id, COUNT(*) AS alert_count,
-                   SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) AS active_count
-            FROM alerts GROUP BY chat_id ORDER BY alert_count DESC
+            SELECT a.chat_id, COUNT(*) AS alert_count,
+                   SUM(CASE WHEN a.is_active = 1 THEN 1 ELSE 0 END) AS active_count,
+                   us.first_name, us.username
+            FROM alerts a
+            LEFT JOIN user_settings us ON a.chat_id = us.chat_id
+            GROUP BY a.chat_id, us.first_name, us.username
+            ORDER BY alert_count DESC
             LIMIT %s OFFSET 0
         """, (ADMIN_USERS_PER_PAGE,))
         users = cursor.fetchall()
@@ -2184,8 +2271,9 @@ def admin_command(update: Update, context: CallbackContext):
         cid = u["chat_id"]
         total = u["alert_count"]
         active = u["active_count"] or 0
+        label = _format_user_label(u["first_name"], u["username"], cid)
         keyboard.append([InlineKeyboardButton(
-            f"🆔 {cid} — {total} alerts ({active} active)",
+            f"{label} — {total} alerts ({active} active)",
             callback_data=f"adm_user_{cid}"
         )])
 
@@ -2223,9 +2311,13 @@ def admin_user_list(update: Update, context: CallbackContext):
         total_users = cursor.fetchone()["count"]
 
         cursor.execute("""
-            SELECT chat_id, COUNT(*) AS alert_count,
-                   SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) AS active_count
-            FROM alerts GROUP BY chat_id ORDER BY alert_count DESC
+            SELECT a.chat_id, COUNT(*) AS alert_count,
+                   SUM(CASE WHEN a.is_active = 1 THEN 1 ELSE 0 END) AS active_count,
+                   us.first_name, us.username
+            FROM alerts a
+            LEFT JOIN user_settings us ON a.chat_id = us.chat_id
+            GROUP BY a.chat_id, us.first_name, us.username
+            ORDER BY alert_count DESC
             LIMIT %s OFFSET %s
         """, (ADMIN_USERS_PER_PAGE, offset))
         users = cursor.fetchall()
@@ -2242,8 +2334,9 @@ def admin_user_list(update: Update, context: CallbackContext):
         cid = u["chat_id"]
         total = u["alert_count"]
         active = u["active_count"] or 0
+        label = _format_user_label(u["first_name"], u["username"], cid)
         keyboard.append([InlineKeyboardButton(
-            f"🆔 {cid} — {total} alerts ({active} active)",
+            f"{label} — {total} alerts ({active} active)",
             callback_data=f"adm_user_{cid}"
         )])
 
@@ -2284,6 +2377,11 @@ def admin_view_user_alerts(update: Update, context: CallbackContext):
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute(
+            "SELECT first_name, username FROM user_settings WHERE chat_id = %s",
+            (chat_id,)
+        )
+        user_info = cursor.fetchone()
+        cursor.execute(
             "SELECT id, keywords, location, is_active, last_checked FROM alerts WHERE chat_id = %s ORDER BY id",
             (chat_id,)
         )
@@ -2292,10 +2390,16 @@ def admin_view_user_alerts(update: Update, context: CallbackContext):
         if conn:
             db_pool.return_connection(conn)
 
+    user_label = _format_user_label(
+        user_info["first_name"] if user_info else None,
+        user_info["username"] if user_info else None,
+        chat_id
+    )
+    escaped_label = escape_markdown_v1(user_label)
     if not alerts:
-        text = f"👤 *User {chat_id}*\n\nNo alerts found."
+        text = f"{escaped_label}\n\nNo alerts found."
     else:
-        text = f"👤 *User {chat_id}*\n\n📋 {len(alerts)} alert(s):\n"
+        text = f"{escaped_label}\n\n📋 {len(alerts)} alert(s):\n"
 
     keyboard = []
     for a in alerts:
@@ -2307,6 +2411,7 @@ def admin_view_user_alerts(update: Update, context: CallbackContext):
             callback_data=f"adm_va_{a['id']}"
         )])
 
+    keyboard.append([InlineKeyboardButton("🗑️ Delete User", callback_data=f"adm_deluserstart_{chat_id}")])
     keyboard.append([InlineKeyboardButton("⬅️ Back to Users", callback_data="adm_users")])
     keyboard.append([InlineKeyboardButton("❌ Close", callback_data="adm_cancel")])
 
@@ -2344,11 +2449,17 @@ def admin_view_alert_details(update: Update, context: CallbackContext):
 
         cursor.execute("SELECT COUNT(*) FROM sent_jobs WHERE alert_id = %s", (alert_id,))
         sent_count = cursor.fetchone()["count"]
+
+        chat_id = alert["chat_id"]
+        cursor.execute(
+            "SELECT first_name, username FROM user_settings WHERE chat_id = %s",
+            (chat_id,)
+        )
+        user_info = cursor.fetchone()
     finally:
         if conn:
             db_pool.return_connection(conn)
 
-    chat_id = alert["chat_id"]
     status_icon = "🟢" if alert["is_active"] else "🔴"
     status_text = "Active" if alert["is_active"] else "Paused"
 
@@ -2382,9 +2493,21 @@ def admin_view_alert_details(update: Update, context: CallbackContext):
         except (json.JSONDecodeError, KeyError):
             filters_text = "\n<i>Filters: unable to parse</i>\n"
 
+    # Build user display string
+    first_name = user_info["first_name"] if user_info else None
+    uname = user_info["username"] if user_info else None
+    if first_name and uname:
+        user_display = f"{html.escape(first_name)} (@{html.escape(uname)}) ({chat_id})"
+    elif first_name:
+        user_display = f"{html.escape(first_name)} ({chat_id})"
+    elif uname:
+        user_display = f"@{html.escape(uname)} ({chat_id})"
+    else:
+        user_display = f"<code>{chat_id}</code>"
+
     text = (
         f"🔔 <b>Alert #{alert_id}</b>\n\n"
-        f"👤 <b>User:</b> <code>{chat_id}</code>\n"
+        f"👤 <b>User:</b> {user_display}\n"
         f"📝 <b>Keywords:</b> {html.escape(alert['keywords'])}\n"
         f"📍 <b>Location:</b> {html.escape(alert['location'])}\n"
         f"📊 <b>Status:</b> {status_icon} {status_text}\n"
@@ -2502,6 +2625,93 @@ def admin_delete_alert_confirm(update: Update, context: CallbackContext):
     # Navigate back to user's alerts
     query.data = f"adm_back_user_{chat_id}"
     return admin_view_user_alerts(update, context)
+
+
+def admin_delete_user_start(update: Update, context: CallbackContext):
+    """Show delete confirmation for a user and all their data."""
+    query = update.callback_query
+    if update.effective_user.id != ADMIN_USER_ID:
+        return ConversationHandler.END
+    safe_answer_callback_query(query)
+
+    chat_id = int(query.data.split("_")[-1])
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT first_name, username FROM user_settings WHERE chat_id = %s",
+            (chat_id,)
+        )
+        user_info = cursor.fetchone()
+        cursor.execute("SELECT COUNT(*) as cnt FROM alerts WHERE chat_id = %s", (chat_id,))
+        alert_count = cursor.fetchone()["cnt"]
+        cursor.execute("SELECT COUNT(*) as cnt FROM saved_jobs WHERE chat_id = %s", (chat_id,))
+        saved_count = cursor.fetchone()["cnt"]
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
+
+    user_label = _format_user_label(
+        user_info["first_name"] if user_info else None,
+        user_info["username"] if user_info else None,
+        chat_id
+    )
+
+    text = (
+        f"⚠️ Are you sure you want to delete user {user_label} and ALL their data?\n\n"
+        f"This will remove:\n"
+        f"• {alert_count} alert(s) (and all sent job records)\n"
+        f"• {saved_count} saved job(s)\n"
+        f"• User settings\n\n"
+        f"This action cannot be undone."
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Yes, Delete", callback_data=f"adm_deluserconf_{chat_id}"),
+            InlineKeyboardButton("❌ No, Cancel", callback_data=f"adm_user_{chat_id}"),
+        ],
+    ]
+
+    try:
+        query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except telegram.error.BadRequest as e:
+        if "message is not modified" not in str(e).lower():
+            raise
+    return ADMIN_USER_ALERTS
+
+
+def admin_delete_user_confirm(update: Update, context: CallbackContext):
+    """Delete user and all their data, navigate back to user list."""
+    query = update.callback_query
+    if update.effective_user.id != ADMIN_USER_ID:
+        return ConversationHandler.END
+
+    chat_id = int(query.data.split("_")[-1])
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        # saved_jobs is not cascaded from alerts, delete separately
+        cursor.execute("DELETE FROM saved_jobs WHERE chat_id = %s", (chat_id,))
+        # alerts CASCADE to sent_jobs and job_details_cache
+        cursor.execute("DELETE FROM alerts WHERE chat_id = %s", (chat_id,))
+        cursor.execute("DELETE FROM user_settings WHERE chat_id = %s", (chat_id,))
+        conn.commit()
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
+
+    query.answer("User deleted.")
+    # Navigate back to user list
+    query.data = "adm_users"
+    return admin_user_list(update, context)
 
 
 def admin_cancel(update: Update, context: CallbackContext):
@@ -7060,6 +7270,12 @@ def main():
 
     dispatcher.add_error_handler(error_handler)
 
+    # Backfill user names for existing users (runs once on startup)
+    try:
+        backfill_user_info(updater.bot)
+    except Exception as e:
+        logger.warning(f"User info backfill failed (non-critical): {e}")
+
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         name="main_conversation",
@@ -7287,6 +7503,9 @@ def main():
             ],
             ADMIN_USER_ALERTS: [
                 CallbackQueryHandler(admin_view_alert_details, pattern=r"^adm_va_\d+$"),
+                CallbackQueryHandler(admin_delete_user_start, pattern=r"^adm_deluserstart_\d+$"),
+                CallbackQueryHandler(admin_delete_user_confirm, pattern=r"^adm_deluserconf_\d+$"),
+                CallbackQueryHandler(admin_view_user_alerts, pattern=r"^adm_user_\d+$"),
                 CallbackQueryHandler(admin_user_list, pattern=r"^adm_users$"),
                 CallbackQueryHandler(admin_cancel, pattern=r"^adm_cancel$"),
             ],
