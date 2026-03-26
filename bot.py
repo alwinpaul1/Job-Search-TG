@@ -1003,7 +1003,7 @@ def safe_edit_message(
 ) = range(19)
 
 # Admin panel states (separate ConversationHandler, group=2)
-(ADMIN_MENU, ADMIN_USER_ALERTS, ADMIN_ALERT_DETAILS) = range(100, 103)
+(ADMIN_MENU, ADMIN_USER_ALERTS, ADMIN_ALERT_DETAILS, ADMIN_EDIT_KEYWORDS, ADMIN_EDIT_LOCATION, ADMIN_EDIT_FILTERS) = range(100, 106)
 ADMIN_USERS_PER_PAGE = 10
 
 JOBS_PER_PAGE = 5
@@ -2520,6 +2520,9 @@ def admin_view_alert_details(update: Update, context: CallbackContext):
     action_cb = f"adm_pause_{alert_id}" if alert["is_active"] else f"adm_resume_{alert_id}"
 
     keyboard = [
+        [InlineKeyboardButton("✏️ Edit Keywords", callback_data=f"adm_editkw_{alert_id}"),
+         InlineKeyboardButton("✏️ Edit Location", callback_data=f"adm_editloc_{alert_id}")],
+        [InlineKeyboardButton("🔧 Edit Filters", callback_data=f"adm_editflt_{alert_id}")],
         [InlineKeyboardButton(action_text, callback_data=action_cb)],
         [InlineKeyboardButton("🗑️ Delete", callback_data=f"adm_delstart_{alert_id}")],
         [InlineKeyboardButton("⬅️ Back to User Alerts", callback_data=f"adm_back_user_{chat_id}")],
@@ -2565,6 +2568,536 @@ def admin_toggle_alert(update: Update, context: CallbackContext):
     # Re-render alert details
     query.data = f"adm_va_{alert_id}"
     return admin_view_alert_details(update, context)
+
+
+
+def admin_edit_keywords_start(update: Update, context: CallbackContext):
+    """Prompt admin to enter new keywords for an alert."""
+    query = update.callback_query
+    if update.effective_user.id != ADMIN_USER_ID:
+        return ConversationHandler.END
+    safe_answer_callback_query(query)
+
+    alert_id = int(query.data.split("_")[-1])
+    context.user_data["admin_edit_alert_id"] = alert_id
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT keywords FROM alerts WHERE id = %s", (alert_id,))
+        alert = cursor.fetchone()
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
+
+    if not alert:
+        query.edit_message_text("\u274c Alert not found.")
+        return ADMIN_ALERT_DETAILS
+
+    query.edit_message_text(
+        f"\u270f\ufe0f *Edit Keywords for Alert \\#{alert_id}*\n\n"
+        f"Current: `{escape_markdown(alert['keywords'])}`\n\n"
+        f"Send the new keywords:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("\u2b05\ufe0f Go Back", callback_data=f"adm_va_{alert_id}"),
+             InlineKeyboardButton("\u274c Cancel", callback_data="adm_cancel")]
+        ])
+    )
+    return ADMIN_EDIT_KEYWORDS
+
+
+def admin_edit_keywords_receive(update: Update, context: CallbackContext):
+    """Receive new keywords from admin and update the alert."""
+    if update.effective_user.id != ADMIN_USER_ID:
+        return ConversationHandler.END
+
+    alert_id = context.user_data.get("admin_edit_alert_id")
+    if not alert_id:
+        update.message.reply_text("\u274c No alert selected.")
+        return ADMIN_ALERT_DETAILS
+
+    new_keywords = update.message.text.strip()
+    if not new_keywords:
+        update.message.reply_text("\u274c Keywords cannot be empty. Try again or /cancel.")
+        return ADMIN_EDIT_KEYWORDS
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE alerts SET keywords = %s WHERE id = %s", (new_keywords, alert_id))
+        conn.commit()
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
+
+    update.message.reply_text(f"\u2705 Keywords updated to: *{escape_markdown(new_keywords)}*", parse_mode=ParseMode.MARKDOWN)
+
+    # Show alert details again
+    context.user_data.pop("admin_edit_alert_id", None)
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT chat_id FROM alerts WHERE id = %s", (alert_id,))
+        alert = cursor.fetchone()
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
+
+    if alert:
+        _send_admin_alert_details(update.message, alert_id, context)
+    return ADMIN_ALERT_DETAILS
+
+
+def admin_edit_location_start(update: Update, context: CallbackContext):
+    """Prompt admin to enter new location for an alert."""
+    query = update.callback_query
+    if update.effective_user.id != ADMIN_USER_ID:
+        return ConversationHandler.END
+    safe_answer_callback_query(query)
+
+    alert_id = int(query.data.split("_")[-1])
+    context.user_data["admin_edit_alert_id"] = alert_id
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT location FROM alerts WHERE id = %s", (alert_id,))
+        alert = cursor.fetchone()
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
+
+    if not alert:
+        query.edit_message_text("\u274c Alert not found.")
+        return ADMIN_ALERT_DETAILS
+
+    query.edit_message_text(
+        f"\u270f\ufe0f *Edit Location for Alert \\#{alert_id}*\n\n"
+        f"Current: `{escape_markdown(alert['location'])}`\n\n"
+        f"Send the new location:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("\u2b05\ufe0f Go Back", callback_data=f"adm_va_{alert_id}"),
+             InlineKeyboardButton("\u274c Cancel", callback_data="adm_cancel")]
+        ])
+    )
+    return ADMIN_EDIT_LOCATION
+
+
+def admin_edit_location_receive(update: Update, context: CallbackContext):
+    """Receive new location from admin and update the alert."""
+    if update.effective_user.id != ADMIN_USER_ID:
+        return ConversationHandler.END
+
+    alert_id = context.user_data.get("admin_edit_alert_id")
+    if not alert_id:
+        update.message.reply_text("\u274c No alert selected.")
+        return ADMIN_ALERT_DETAILS
+
+    new_location = update.message.text.strip()
+    if not new_location:
+        update.message.reply_text("\u274c Location cannot be empty. Try again or /cancel.")
+        return ADMIN_EDIT_LOCATION
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE alerts SET location = %s WHERE id = %s", (new_location, alert_id))
+        conn.commit()
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
+
+    update.message.reply_text(f"\u2705 Location updated to: *{escape_markdown(new_location)}*", parse_mode=ParseMode.MARKDOWN)
+
+    context.user_data.pop("admin_edit_alert_id", None)
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT chat_id FROM alerts WHERE id = %s", (alert_id,))
+        alert = cursor.fetchone()
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
+
+    if alert:
+        _send_admin_alert_details(update.message, alert_id, context)
+    return ADMIN_ALERT_DETAILS
+
+
+
+def admin_edit_filters_start(update: Update, context: CallbackContext):
+    """Show filter category menu for admin filter editing."""
+    query = update.callback_query
+    if update.effective_user.id != ADMIN_USER_ID:
+        return ConversationHandler.END
+    safe_answer_callback_query(query)
+
+    alert_id = int(query.data.split("_")[-1])
+    context.user_data["admin_edit_alert_id"] = alert_id
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT filters FROM alerts WHERE id = %s", (alert_id,))
+        alert = cursor.fetchone()
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
+
+    if not alert:
+        query.edit_message_text("❌ Alert not found.")
+        return ADMIN_ALERT_DETAILS
+
+    try:
+        filters = json.loads(alert["filters"]) if alert["filters"] else {}
+    except (json.JSONDecodeError, TypeError):
+        filters = {}
+    for key in ("experience", "job_types", "date_posted", "workplace"):
+        filters.setdefault(key, {})
+    context.user_data["admin_edit_filters"] = filters
+
+    return _show_admin_filter_menu(query, alert_id, filters)
+
+
+def _show_admin_filter_menu(query, alert_id, filters):
+    """Render the admin filter category menu."""
+    experience = ", ".join(filters.get("experience", {}).keys()) or "Any"
+    job_types = ", ".join(filters.get("job_types", {}).keys()) or "Any"
+    date_posted = list(filters.get("date_posted", {}).keys())[0] if filters.get("date_posted") else "Any"
+    workplace = ", ".join(filters.get("workplace", {}).keys()) or "Any"
+
+    text = (
+        f"🔧 <b>Edit Filters for Alert #{alert_id}</b>\n\n"
+        f"<b>Current Filters:</b>\n"
+        f"∙ Date Posted: <code>{html.escape(date_posted)}</code>\n"
+        f"∙ Workplace: <code>{html.escape(workplace)}</code>\n"
+        f"∙ Experience: <code>{html.escape(experience)}</code>\n"
+        f"∙ Job Types: <code>{html.escape(job_types)}</code>"
+    )
+    keyboard = [
+        [InlineKeyboardButton("🗓️ Date Posted", callback_data="adm_flt_cat_dp"),
+         InlineKeyboardButton("🏢 Workplace", callback_data="adm_flt_cat_wp")],
+        [InlineKeyboardButton("🎓 Experience", callback_data="adm_flt_cat_exp"),
+         InlineKeyboardButton("📝 Job Types", callback_data="adm_flt_cat_jt")],
+        [InlineKeyboardButton("⬅️ Go Back", callback_data=f"adm_va_{alert_id}")],
+    ]
+    try:
+        query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+    except telegram.error.BadRequest as e:
+        if "message is not modified" not in str(e).lower():
+            raise
+    return ADMIN_EDIT_FILTERS
+
+
+def admin_filter_show_date_posted(update: Update, context: CallbackContext):
+    """Show Date Posted options (single-select)."""
+    query = update.callback_query
+    if update.effective_user.id != ADMIN_USER_ID:
+        return ConversationHandler.END
+    safe_answer_callback_query(query)
+
+    filters = context.user_data.get("admin_edit_filters", {})
+    current = filters.get("date_posted", {})
+
+    keyboard = []
+    for option_text, option_id in DATE_POSTED_OPTIONS.items():
+        is_selected = option_text in current
+        display = f"✅ {option_text}" if is_selected else option_text
+        keyboard.append([InlineKeyboardButton(display, callback_data=f"adm_flt_dp_{option_id}_{option_text}")])
+    keyboard.append([InlineKeyboardButton("🗑️ Clear", callback_data="adm_flt_dp_clear_clear")])
+    keyboard.append([InlineKeyboardButton("✔️ Done", callback_data="adm_flt_done_dp")])
+
+    query.edit_message_text("🗓️ <b>Date Posted</b>\nSelect one option:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+    return ADMIN_EDIT_FILTERS
+
+
+def admin_filter_date_posted_selected(update: Update, context: CallbackContext):
+    """Handle Date Posted option selection."""
+    query = update.callback_query
+    if update.effective_user.id != ADMIN_USER_ID:
+        return ConversationHandler.END
+    safe_answer_callback_query(query)
+
+    filters = context.user_data.get("admin_edit_filters", {})
+    parts = query.data.split("_", 4)
+    option_id = parts[3]
+    option_text = parts[4]
+
+    if option_id == "clear":
+        filters["date_posted"] = {}
+    elif option_text in filters.get("date_posted", {}):
+        filters["date_posted"] = {}
+    else:
+        filters["date_posted"] = {option_text: option_id}
+
+    context.user_data["admin_edit_filters"] = filters
+    return admin_filter_show_date_posted(update, context)
+
+
+def admin_filter_show_workplace(update: Update, context: CallbackContext):
+    """Show Workplace options (multi-select)."""
+    query = update.callback_query
+    if update.effective_user.id != ADMIN_USER_ID:
+        return ConversationHandler.END
+    safe_answer_callback_query(query)
+
+    filters = context.user_data.get("admin_edit_filters", {})
+    selected = filters.get("workplace", {})
+
+    keyboard = []
+    for option_text, option_id in WORKPLACE_TYPES.items():
+        is_selected = option_text in selected
+        display = f"✅ {option_text}" if is_selected else option_text
+        keyboard.append([InlineKeyboardButton(display, callback_data=f"adm_flt_wp_{option_id}_{option_text}")])
+    keyboard.append([InlineKeyboardButton("✔️ Done", callback_data="adm_flt_done_wp")])
+
+    query.edit_message_text("🏢 <b>Workplace</b>\nToggle options:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+    return ADMIN_EDIT_FILTERS
+
+
+def admin_filter_workplace_selected(update: Update, context: CallbackContext):
+    """Handle Workplace option toggle."""
+    query = update.callback_query
+    if update.effective_user.id != ADMIN_USER_ID:
+        return ConversationHandler.END
+    safe_answer_callback_query(query)
+
+    filters = context.user_data.get("admin_edit_filters", {})
+    parts = query.data.split("_", 4)
+    option_id = parts[3]
+    option_text = parts[4]
+
+    selected = filters.setdefault("workplace", {})
+    if option_text in selected:
+        del selected[option_text]
+    else:
+        selected[option_text] = option_id
+
+    context.user_data["admin_edit_filters"] = filters
+    return admin_filter_show_workplace(update, context)
+
+
+def admin_filter_show_experience(update: Update, context: CallbackContext):
+    """Show Experience options (multi-select)."""
+    query = update.callback_query
+    if update.effective_user.id != ADMIN_USER_ID:
+        return ConversationHandler.END
+    safe_answer_callback_query(query)
+
+    filters = context.user_data.get("admin_edit_filters", {})
+    selected = filters.get("experience", {})
+
+    keyboard = []
+    for option_text, option_id in EXPERIENCE_LEVELS.items():
+        is_selected = option_text in selected
+        display = f"✅ {option_text}" if is_selected else option_text
+        keyboard.append([InlineKeyboardButton(display, callback_data=f"adm_flt_exp_{option_id}_{option_text}")])
+    keyboard.append([InlineKeyboardButton("✔️ Done", callback_data="adm_flt_done_exp")])
+
+    query.edit_message_text("🎓 <b>Experience Level</b>\nToggle options:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+    return ADMIN_EDIT_FILTERS
+
+
+def admin_filter_experience_selected(update: Update, context: CallbackContext):
+    """Handle Experience option toggle."""
+    query = update.callback_query
+    if update.effective_user.id != ADMIN_USER_ID:
+        return ConversationHandler.END
+    safe_answer_callback_query(query)
+
+    filters = context.user_data.get("admin_edit_filters", {})
+    parts = query.data.split("_", 4)
+    option_id = parts[3]
+    option_text = parts[4]
+
+    selected = filters.setdefault("experience", {})
+    if option_text in selected:
+        del selected[option_text]
+    else:
+        selected[option_text] = option_id
+
+    context.user_data["admin_edit_filters"] = filters
+    return admin_filter_show_experience(update, context)
+
+
+def admin_filter_show_job_types(update: Update, context: CallbackContext):
+    """Show Job Types options (multi-select)."""
+    query = update.callback_query
+    if update.effective_user.id != ADMIN_USER_ID:
+        return ConversationHandler.END
+    safe_answer_callback_query(query)
+
+    filters = context.user_data.get("admin_edit_filters", {})
+    selected = filters.get("job_types", {})
+
+    keyboard = []
+    for option_text, option_id in JOB_TYPES.items():
+        is_selected = option_text in selected
+        display = f"✅ {option_text}" if is_selected else option_text
+        keyboard.append([InlineKeyboardButton(display, callback_data=f"adm_flt_jt_{option_id}_{option_text}")])
+    keyboard.append([InlineKeyboardButton("✔️ Done", callback_data="adm_flt_done_jt")])
+
+    query.edit_message_text("📝 <b>Job Types</b>\nToggle options:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+    return ADMIN_EDIT_FILTERS
+
+
+def admin_filter_job_types_selected(update: Update, context: CallbackContext):
+    """Handle Job Types option toggle."""
+    query = update.callback_query
+    if update.effective_user.id != ADMIN_USER_ID:
+        return ConversationHandler.END
+    safe_answer_callback_query(query)
+
+    filters = context.user_data.get("admin_edit_filters", {})
+    parts = query.data.split("_", 4)
+    option_id = parts[3]
+    option_text = parts[4]
+
+    selected = filters.setdefault("job_types", {})
+    if option_text in selected:
+        del selected[option_text]
+    else:
+        selected[option_text] = option_id
+
+    context.user_data["admin_edit_filters"] = filters
+    return admin_filter_show_job_types(update, context)
+
+
+def admin_filter_done(update: Update, context: CallbackContext):
+    """Save filters to DB and return to filter category menu."""
+    query = update.callback_query
+    if update.effective_user.id != ADMIN_USER_ID:
+        return ConversationHandler.END
+    safe_answer_callback_query(query)
+
+    alert_id = context.user_data.get("admin_edit_alert_id")
+    filters = context.user_data.get("admin_edit_filters", {})
+
+    if not alert_id:
+        query.edit_message_text("❌ No alert selected.")
+        return ADMIN_ALERT_DETAILS
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE alerts SET filters = %s WHERE id = %s", (json.dumps(filters), alert_id))
+        conn.commit()
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
+
+    return _show_admin_filter_menu(query, alert_id, filters)
+
+
+def _send_admin_alert_details(message, alert_id, context):
+    """Send alert details as a new message (used after text input edits)."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM alerts WHERE id = %s", (alert_id,))
+        alert = cursor.fetchone()
+        if not alert:
+            message.reply_text("\u274c Alert not found.")
+            return
+
+        cursor.execute("SELECT COUNT(*) FROM sent_jobs WHERE alert_id = %s", (alert_id,))
+        sent_count = cursor.fetchone()["count"]
+
+        chat_id = alert["chat_id"]
+        cursor.execute(
+            "SELECT first_name, username FROM user_settings WHERE chat_id = %s",
+            (chat_id,)
+        )
+        user_info = cursor.fetchone()
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
+
+    status_icon = "\U0001f7e2" if alert["is_active"] else "\U0001f534"
+    status_text = "Active" if alert["is_active"] else "Paused"
+
+    last_checked_display = "Never"
+    last_checked_val = alert["last_checked"]
+    if last_checked_val:
+        try:
+            if isinstance(last_checked_val, datetime):
+                utc_dt = last_checked_val.replace(tzinfo=pytz.utc) if last_checked_val.tzinfo is None else last_checked_val
+            else:
+                utc_dt = datetime.strptime(str(last_checked_val).split(".")[0], "%Y-%m-%d %H:%M:%S").replace(tzinfo=pytz.utc)
+            last_checked_display = utc_dt.strftime("%Y-%m-%d %H:%M UTC")
+        except (ValueError, pytz.UnknownTimeZoneError):
+            last_checked_display = str(last_checked_val)[:16]
+
+    filters_text = ""
+    if alert["filters"]:
+        try:
+            f = json.loads(alert["filters"])
+            experience = ", ".join(f.get("experience", {}).keys()) or "Any"
+            job_types = ", ".join(f.get("job_types", {}).keys()) or "Any"
+            date_posted = list(f.get("date_posted", {}).keys())[0] if f.get("date_posted") else "Any"
+            workplace = list(f.get("workplace", {}).keys())[0] if f.get("workplace") else "Any"
+            filters_text = (
+                f"\n<b>Filters:</b>\n"
+                f"\u2219 Date Posted: <code>{html.escape(date_posted)}</code>\n"
+                f"\u2219 Workplace: <code>{html.escape(workplace)}</code>\n"
+                f"\u2219 Experience: <code>{html.escape(experience)}</code>\n"
+                f"\u2219 Job Types: <code>{html.escape(job_types)}</code>\n"
+            )
+        except (json.JSONDecodeError, KeyError):
+            filters_text = "\n<i>Filters: unable to parse</i>\n"
+
+    first_name = user_info["first_name"] if user_info else None
+    uname = user_info["username"] if user_info else None
+    if first_name and uname:
+        user_display = f"{html.escape(first_name)} (@{html.escape(uname)}) ({chat_id})"
+    elif first_name:
+        user_display = f"{html.escape(first_name)} ({chat_id})"
+    elif uname:
+        user_display = f"@{html.escape(uname)} ({chat_id})"
+    else:
+        user_display = f"<code>{chat_id}</code>"
+
+    text = (
+        f"\U0001f514 <b>Alert #{alert_id}</b>\n\n"
+        f"\U0001f464 <b>User:</b> {user_display}\n"
+        f"\U0001f4dd <b>Keywords:</b> {html.escape(alert['keywords'])}\n"
+        f"\U0001f4cd <b>Location:</b> {html.escape(alert['location'])}\n"
+        f"\U0001f4ca <b>Status:</b> {status_icon} {status_text}\n"
+        f"\U0001f4ec <b>Jobs Sent:</b> {sent_count}\n"
+        f"\U0001f551 <b>Last Checked:</b> {last_checked_display}\n"
+        f"{filters_text}"
+    )
+
+    action_text = "\u23f8\ufe0f Pause" if alert["is_active"] else "\u25b6\ufe0f Resume"
+    action_cb = f"adm_pause_{alert_id}" if alert["is_active"] else f"adm_resume_{alert_id}"
+
+    keyboard = [
+        [InlineKeyboardButton("\u270f\ufe0f Edit Keywords", callback_data=f"adm_editkw_{alert_id}"),
+         InlineKeyboardButton("\u270f\ufe0f Edit Location", callback_data=f"adm_editloc_{alert_id}")],
+        [InlineKeyboardButton("\U0001f527 Edit Filters", callback_data=f"adm_editflt_{alert_id}")],
+        [InlineKeyboardButton(action_text, callback_data=action_cb)],
+        [InlineKeyboardButton("\U0001f5d1\ufe0f Delete", callback_data=f"adm_delstart_{alert_id}")],
+        [InlineKeyboardButton("\u2b05\ufe0f Back to User Alerts", callback_data=f"adm_back_user_{chat_id}")],
+        [InlineKeyboardButton("\u2b05\ufe0f Back to Users", callback_data="adm_users")],
+        [InlineKeyboardButton("\u274c Close", callback_data="adm_cancel")],
+    ]
+
+    message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.HTML
+    )
 
 
 def admin_delete_alert_start(update: Update, context: CallbackContext):
@@ -7510,9 +8043,37 @@ def main():
                 CallbackQueryHandler(admin_cancel, pattern=r"^adm_cancel$"),
             ],
             ADMIN_ALERT_DETAILS: [
+                CallbackQueryHandler(admin_edit_keywords_start, pattern=r"^adm_editkw_\d+$"),
+                CallbackQueryHandler(admin_edit_location_start, pattern=r"^adm_editloc_\d+$"),
+                CallbackQueryHandler(admin_edit_filters_start, pattern=r"^adm_editflt_\d+$"),
                 CallbackQueryHandler(admin_toggle_alert, pattern=r"^adm_(pause|resume)_\d+$"),
                 CallbackQueryHandler(admin_delete_alert_start, pattern=r"^adm_delstart_\d+$"),
                 CallbackQueryHandler(admin_delete_alert_confirm, pattern=r"^adm_delconf_\d+$"),
+                CallbackQueryHandler(admin_view_alert_details, pattern=r"^adm_va_\d+$"),
+                CallbackQueryHandler(admin_view_user_alerts, pattern=r"^adm_back_user_\d+$"),
+                CallbackQueryHandler(admin_user_list, pattern=r"^adm_users$"),
+                CallbackQueryHandler(admin_cancel, pattern=r"^adm_cancel$"),
+            ],
+            ADMIN_EDIT_KEYWORDS: [
+                MessageHandler(Filters.text & ~Filters.command, admin_edit_keywords_receive),
+                CallbackQueryHandler(admin_view_alert_details, pattern=r"^adm_va_\d+$"),
+                CallbackQueryHandler(admin_cancel, pattern=r"^adm_cancel$"),
+            ],
+            ADMIN_EDIT_LOCATION: [
+                MessageHandler(Filters.text & ~Filters.command, admin_edit_location_receive),
+                CallbackQueryHandler(admin_view_alert_details, pattern=r"^adm_va_\d+$"),
+                CallbackQueryHandler(admin_cancel, pattern=r"^adm_cancel$"),
+            ],
+            ADMIN_EDIT_FILTERS: [
+                CallbackQueryHandler(admin_filter_show_date_posted, pattern=r"^adm_flt_cat_dp$"),
+                CallbackQueryHandler(admin_filter_show_workplace, pattern=r"^adm_flt_cat_wp$"),
+                CallbackQueryHandler(admin_filter_show_experience, pattern=r"^adm_flt_cat_exp$"),
+                CallbackQueryHandler(admin_filter_show_job_types, pattern=r"^adm_flt_cat_jt$"),
+                CallbackQueryHandler(admin_filter_done, pattern=r"^adm_flt_done_(dp|wp|exp|jt)$"),
+                CallbackQueryHandler(admin_filter_date_posted_selected, pattern=r"^adm_flt_dp_"),
+                CallbackQueryHandler(admin_filter_workplace_selected, pattern=r"^adm_flt_wp_"),
+                CallbackQueryHandler(admin_filter_experience_selected, pattern=r"^adm_flt_exp_"),
+                CallbackQueryHandler(admin_filter_job_types_selected, pattern=r"^adm_flt_jt_"),
                 CallbackQueryHandler(admin_view_alert_details, pattern=r"^adm_va_\d+$"),
                 CallbackQueryHandler(admin_view_user_alerts, pattern=r"^adm_back_user_\d+$"),
                 CallbackQueryHandler(admin_user_list, pattern=r"^adm_users$"),
@@ -7543,6 +8104,12 @@ def main():
             return admin_user_list(update, context)
         elif data.startswith("adm_pause_") or data.startswith("adm_resume_"):
             return admin_toggle_alert(update, context)
+        elif data.startswith("adm_editkw_"):
+            return admin_edit_keywords_start(update, context)
+        elif data.startswith("adm_editloc_"):
+            return admin_edit_location_start(update, context)
+        elif data.startswith("adm_editflt_"):
+            return admin_edit_filters_start(update, context)
         elif data.startswith("adm_delstart_"):
             return admin_delete_alert_start(update, context)
         elif data.startswith("adm_delconf_"):
