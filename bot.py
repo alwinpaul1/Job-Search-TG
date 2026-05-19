@@ -883,24 +883,25 @@ ADMIN_USER_ID = 7744296624  # Your Telegram user ID
 
 # --- Text and Link Canonicalization Functions ---
 def canonical_link(url: str) -> str:
-    """Extract numeric LinkedIn job ID for consistent deduplication."""
-    # Try multiple patterns to extract LinkedIn job ID
+    """Extract numeric job ID for consistent deduplication across LinkedIn, Indeed, Glassdoor."""
     patterns = [
-        r"/jobs/view/(\d+)",  # Standard: /jobs/view/123456
-        r"/jobs/view/[a-z0-9%\-]+-(\d{7,})",  # Slug: /jobs/view/ai-engineer-at-company-4370539449
-        r"/jobs/(\d+)/",      # Alternative: /jobs/123456/
-        r"job[_-](\d+)",      # Job ID in parameter: job_123456 or job-123456
-        r"jobId[=:](\d+)",    # JobId parameter: jobId=123456 or jobId:123456
+        (r"/jobs/view/(\d+)", "li"),
+        (r"/jobs/view/[a-z0-9%\-]+-(\d{7,})", "li"),
+        (r"/jobs/(\d+)/", "li"),
+        (r"[?&]jk=([a-f0-9]{8,})", "in"),
+        (r"[?&]vjk=([a-f0-9]{8,})", "in"),
+        (r"[?&]jl=(\d+)", "gd"),
+        (r"job[_-](\d+)", "li"),
+        (r"jobId[=:](\d+)", "li"),
     ]
 
-    for pattern in patterns:
+    for pattern, prefix in patterns:
         m = re.search(pattern, url)
         if m:
-            return m.group(1)
+            return f"{prefix}{m.group(1)}" if prefix in ("in", "gd") else m.group(1)
 
-    # If no job ID found, normalize URL by removing query params and fragments
-    base_url = url.lower().split("?")[0].split("#")[0]
-    return base_url.rstrip("/")
+    base_url = url.lower().split("#")[0].rstrip("/")
+    return base_url
 
 
 def canonical_text(txt: str) -> str:
@@ -939,6 +940,13 @@ def parse_date_posted_to_datetime(date_str):
         years_match = re.search(r"\d+", date_str)
         years = int(years_match.group()) if years_match else 1
         return now - timedelta(days=365 * years)
+    iso_match = re.match(r"(\d{4})-(\d{2})-(\d{2})", date_str)
+    if iso_match:
+        try:
+            y, mo, d = (int(iso_match.group(i)) for i in (1, 2, 3))
+            return datetime(y, mo, d, tzinfo=pytz.UTC)
+        except (ValueError, OverflowError):
+            pass
     return now  # Default to now if we can't parse it
 
 
@@ -5310,163 +5318,151 @@ def scrape_linkedin(keyword, location, filters_dict, max_pages=None):
     )
 
 
+JOBQUEST_DATE_MAP = {"r86400": 24, "r604800": 168, "r2592000": 720}
+JOBQUEST_JOBTYPE_MAP = {"F": "fulltime", "P": "parttime", "C": "contract", "I": "internship"}
+
+
+def _bot_filters_to_jobquest_kwargs(filters_dict):
+    """Translate bot's LinkedIn-URL-param filters → JobQuest kwargs.
+
+    Returns (base_kwargs, job_types_list) where job_types_list is for fan-out.
+    """
+    kw = {}
+    if filters_dict.get("f_TPR"):
+        kw["hours_old"] = JOBQUEST_DATE_MAP.get(filters_dict["f_TPR"])
+    if filters_dict.get("f_WT"):
+        codes = set(filters_dict["f_WT"].split(","))
+        if codes == {"2"}:
+            kw["is_remote"] = True
+    job_types = []
+    if filters_dict.get("f_JT"):
+        for c in filters_dict["f_JT"].split(","):
+            if c in JOBQUEST_JOBTYPE_MAP:
+                job_types.append(JOBQUEST_JOBTYPE_MAP[c])
+    return kw, job_types
+
+
+def _jobquest_df_to_bot_jobs(df):
+    """Translate JobQuest DataFrame rows → bot's dict-of-strings shape."""
+    if df is None or len(df) == 0:
+        return []
+    jobs = []
+    for _, row in df.iterrows():
+        link = str(row.get("job_url") or "")
+        title = str(row.get("title") or "")
+        company = str(row.get("company") or "")
+        loc = row.get("location")
+        loc_str = str(loc) if loc and str(loc) != "nan" else ""
+        dp = row.get("date_posted")
+        dp_str = str(dp.date()) if hasattr(dp, "date") else (str(dp) if dp else "N/A")
+        if not link or not title:
+            continue
+        jobs.append({
+            "Title": title, "Company": company,
+            "Location": loc_str, "Date Posted": dp_str, "Link": link,
+        })
+    return jobs
+
+
+def _jobquest_scrape_multi_board(keyword, location, filters_dict, results_wanted=15):
+    """Drop-in replacement for the LinkedIn-only scrape loop.
+
+    Multi-board (LinkedIn + Indeed + Glassdoor) with fan-out on multi-select job_types.
+    Returns list of dicts in the bot's expected shape.
+
+    Note: capped per-site at min(results_wanted, 10) to prevent LinkedIn deep-pagination
+    stalls on niche queries (was observed taking 9 min when LinkedIn couldn't fill
+    the quota for a job_type-filtered query).
+    """
+    from jobquest import scrape_jobs
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as _Timeout
+    import pandas as _pd
+
+    base_kw, job_types = _bot_filters_to_jobquest_kwargs(filters_dict or {})
+    per_site = min(results_wanted, 10)
+    common = dict(search_term=keyword, location=location, results_wanted=per_site,
+                  country_indeed="germany", verbose=0, **base_kw)
+
+    sites = ["linkedin", "indeed", "glassdoor"]
+    TIMEOUT = 60
+    try:
+        if not job_types or len(job_types) >= 4:
+            with ThreadPoolExecutor(max_workers=1) as exe:
+                df = exe.submit(scrape_jobs, site_name=sites, **common).result(timeout=TIMEOUT)
+        elif len(job_types) == 1:
+            with ThreadPoolExecutor(max_workers=1) as exe:
+                df = exe.submit(scrape_jobs, site_name=sites, job_type=job_types[0], **common).result(timeout=TIMEOUT)
+        else:
+            def _li():
+                return scrape_jobs(site_name=["linkedin"], **common)
+            def _other(jt):
+                return scrape_jobs(site_name=["indeed", "glassdoor"], job_type=jt, **common)
+            with ThreadPoolExecutor(max_workers=len(job_types) + 1) as exe:
+                futures = [exe.submit(_li)] + [exe.submit(_other, jt) for jt in job_types]
+                dfs = []
+                for f in futures:
+                    try:
+                        dfs.append(f.result(timeout=TIMEOUT))
+                    except _Timeout:
+                        logger.warning(f"JobQuest fan-out branch timed out after {TIMEOUT}s, skipping")
+            df = _pd.concat(dfs).drop_duplicates(subset=["job_url"]).reset_index(drop=True) if dfs else _pd.DataFrame()
+    except _Timeout:
+        logger.warning(f"JobQuest scrape timed out after {TIMEOUT}s for '{keyword}' in '{location}'")
+        return []
+    except Exception as e:
+        logger.error(f"JobQuest scrape failed: {e}", exc_info=True)
+        return []
+    return _jobquest_df_to_bot_jobs(df)
+
+
 def scrape_linkedin_with_adaptive_jobbert(
     keyword, location, filters_dict,
     max_pages=None, progress_msg=None, user_id=None
 ):
-    """Adaptive JobBERT filtering with memory management (thread-safe)."""
+    """Adaptive JobBERT filtering with memory management (thread-safe).
+
+    Now uses JobQuest under the hood: LinkedIn + Indeed + Glassdoor with
+    Chrome TLS stealth and Cloudflare bypass. JobBERT pipeline unchanged.
+    """
     import gc
     import time
 
-    # Track function start for hang detection
     function_start = time.time()
     resources_start = get_system_resources()
     logger.info(f"🔍 [STAGE] SCRAPE_START | user={user_id} | keyword='{keyword}' | location='{location}'")
     logger.info(f"🔍 [RESOURCE] mem={resources_start['mem_mb']:.1f}MB | cpu={resources_start['cpu_pct']:.1f}% | threads={resources_start['threads']} | sys_mem_avail={resources_start['sys_mem_avail_mb']:.1f}MB")
 
-    all_scraped_jobs = []
+    if progress_msg:
+        safe_progress_update(
+            progress_msg,
+            "🔍 **Searching jobs across LinkedIn, Indeed & Glassdoor** ⠋\n\n"
+            "⏳ _Stealth mode active..._",
+            ParseMode.MARKDOWN
+        )
+
+    results_wanted = (max_pages * 25) if max_pages else 25
+    scrape_start = time.time()
+    all_scraped_jobs = _jobquest_scrape_multi_board(
+        keyword, location, filters_dict or {}, results_wanted=results_wanted
+    )
+    scrape_duration = time.time() - scrape_start
+
     seen_job_ids = set()
     seen_canonical_pairs = set()
+    deduped = []
+    for job_data in all_scraped_jobs:
+        job_id = canonical_link(job_data["Link"])
+        c_title = canonical_text(job_data["Title"])
+        c_company = canonical_text(job_data["Company"])
+        pair = (c_title, c_company)
+        if job_id in seen_job_ids or pair in seen_canonical_pairs:
+            continue
+        seen_job_ids.add(job_id)
+        seen_canonical_pairs.add(pair)
+        deduped.append(job_data)
+    all_scraped_jobs = deduped
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) "
-                      "Chrome/96.0.4664.93 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
-                  "image/avif,image/webp,image/apng,*/*;q=0.8,"
-                  "application/signed-exchange;v=b3;q=0.9",
-        "Connection": "keep-alive",
-    }
-
-    logger.info(f"🔍 [STAGE] LINKEDIN_SCRAPE_INIT | elapsed={time.time()-function_start:.2f}s")
-
-    filter_params = "".join(
-        [f"&{key}={quote_plus(value)}"
-         for key, value in filters_dict.items() if value]
-    )
-
-    page_number = 0
-
-    while True:
-        is_interactive_search = user_id and not str(user_id).startswith(
-            "scheduler_"
-        )
-        if is_interactive_search and not is_user_busy(user_id):
-            logger.info(f"Search cancelled for user {user_id}")
-            break
-
-        if max_pages and page_number >= max_pages:
-            logger.info(
-                f"Reached max_pages limit of {max_pages}. Stopping scrape."
-            )
-            break
-
-        start_index = page_number * 25
-        url = (f"https://www.linkedin.com/jobs-guest/jobs/api/"
-               f"seeMoreJobPostings/search?keywords={quote_plus(keyword)}"
-               f"&location={quote_plus(location)}&start={start_index}"
-               f"{filter_params}")
-
-        if progress_msg:
-            pulse_chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-            pulse_char = pulse_chars[page_number % len(pulse_chars)]
-
-            progress_text = (
-                f"🔍 **Searching LinkedIn** {pulse_char}\n\n"
-                "⏳ _Finding relevant opportunities..._"
-            )
-            safe_progress_update(
-                progress_msg, progress_text, ParseMode.MARKDOWN
-            )
-
-        try:
-            resources_before_request = get_system_resources()
-            logger.info(f"🔍 [STAGE] LINKEDIN_REQUEST_START | page={page_number+1} | elapsed={time.time()-function_start:.2f}s")
-            logger.info(f"🔍 [RESOURCE] BEFORE_REQUEST | net_sent={resources_before_request['net_sent_mb']:.1f}MB | net_recv={resources_before_request['net_recv_mb']:.1f}MB")
-            time.sleep(1.5)
-            request_start_time = time.time()
-            response = requests.get(url, headers=headers, timeout=10)
-            request_duration = time.time() - request_start_time
-            response.raise_for_status()
-            resources_after_request = get_system_resources()
-            logger.info(f"🔍 [STAGE] LINKEDIN_RESPONSE_OK | page={page_number+1} | status={response.status_code} | request_time={request_duration:.2f}s | elapsed={time.time()-function_start:.2f}s")
-            logger.info(f"🔍 [RESOURCE] AFTER_REQUEST | net_recv_delta={resources_after_request['net_recv_mb']-resources_before_request['net_recv_mb']:.2f}MB | response_size={len(response.content)/1024:.1f}KB")
-            soup = BeautifulSoup(response.content, "lxml")
-            job_cards = soup.find_all("div", class_="base-card")
-            logger.info(f"🔍 [STAGE] LINKEDIN_PARSE_COMPLETE | page={page_number+1} | jobs_found={len(job_cards)} | elapsed={time.time()-function_start:.2f}s")
-
-            if not job_cards:
-                logger.info(
-                    f"No more job cards found on page {page_number + 1}. "
-                    f"Stopping scrape."
-                )
-                break
-
-            for job in job_cards:
-                try:
-                    raw_link = job.find(
-                        "a", class_="base-card__full-link"
-                    )["href"]
-                    clean_link = raw_link.split("?")[0]
-                    date_posted_element = (
-                        job.find("time", class_="job-search-card__listdate") or
-                        job.find("time")
-                    )
-                    job_data = {
-                        "Title": job.find(
-                            "h3", class_="base-search-card__title"
-                        ).text.strip(),
-                        "Company": job.find(
-                            "h4", class_="base-search-card__subtitle"
-                        ).text.strip(),
-                        "Location": job.find(
-                            "span", class_="job-search-card__location"
-                        ).text.strip(),
-                        "Date Posted": date_posted_element.text.strip(),
-                        "Link": clean_link,
-                    }
-
-                    job_id = canonical_link(job_data["Link"])
-                    canonical_title = canonical_text(job_data["Title"])
-                    canonical_company = canonical_text(job_data["Company"])
-                    canonical_pair = (canonical_title, canonical_company)
-
-                    if job_id not in seen_job_ids and \
-                            canonical_pair not in seen_canonical_pairs:
-                        seen_job_ids.add(job_id)
-                        seen_canonical_pairs.add(canonical_pair)
-                        all_scraped_jobs.append(job_data)
-
-                except (AttributeError, TypeError):
-                    continue
-
-            new_jobs_count = len([
-                j for j in all_scraped_jobs
-                if canonical_link(j['Link']) not in seen_job_ids
-            ])
-            total_unique_jobs = len(all_scraped_jobs)
-            logger.info(
-                f"📄 Page {page_number + 1}: scraped {new_jobs_count} new jobs"
-                f" (total unique: {total_unique_jobs})"
-            )
-            page_number += 1
-
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 400:
-                logger.info(
-                    f"LinkedIn pagination limit reached at start={start_index}"
-                    f". Stopping scrape."
-                )
-                break
-            logger.error(f"HTTP error for url {url}: {e}")
-            break
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Request failed for url {url}: {e}")
-            break
-
-    logger.info(f"🔍 [STAGE] LINKEDIN_SCRAPE_COMPLETE | jobs={len(all_scraped_jobs)} | elapsed={time.time()-function_start:.2f}s")
+    logger.info(f"🔍 [STAGE] JOBQUEST_SCRAPE_COMPLETE | jobs={len(all_scraped_jobs)} | scrape_time={scrape_duration:.2f}s | elapsed={time.time()-function_start:.2f}s")
 
     if not all_scraped_jobs:
         logger.info(f"🔍 [STAGE] SCRAPE_END_NO_JOBS | elapsed={time.time()-function_start:.2f}s")
