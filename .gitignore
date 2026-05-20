@@ -45,3 +45,6 @@ Scrapling/
 
 # Local development tests
 test_scrape_pipeline.py
+
+# CodeGraph local AST cache
+.codegraph/
