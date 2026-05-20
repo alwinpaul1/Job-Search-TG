@@ -3515,14 +3515,23 @@ def create_paginated_job_message(jobs, page):
     for job in jobs[start_index:end_index]:
         # Use HTML formatting and escape special characters
         title = html.escape(job["Title"])
-        company = html.escape(job["Company"])
-        location = html.escape(job["Location"])
-        date_posted = html.escape(job["Date Posted"])
+        company = html.escape(job["Company"]) if job["Company"] else ""
+        location = html.escape(job["Location"]) if job["Location"] else ""
+        date_posted = html.escape(job["Date Posted"]) if job["Date Posted"] and job["Date Posted"] != "N/A" else "Recent"
         # Escape URL for safe use in HTML href attribute
         job_link = html.escape(job["Link"], quote=True)
 
+        if company and location:
+            company_line = f"<i>{company}</i> - {location}"
+        elif company:
+            company_line = f"<i>{company}</i>"
+        elif location:
+            company_line = location
+        else:
+            company_line = ""
+
         message_text += f"<b>{title}</b>\n"
-        message_text += f"<i>{company}</i> - {location}\n"
+        message_text += f"{company_line}\n"
         message_text += f"Posted: {date_posted}\n"
         message_text += f'<a href="{job_link}">View Job</a>\n\n'
 
@@ -7172,16 +7181,25 @@ def check_single_alert(alert, bot: Bot):
         new_jobs_to_insert_db = []
         for job in jobs_to_send:
             title = html.escape(job["Title"])
-            company = html.escape(job["Company"])
-            location = html.escape(job["Location"])
-            date_posted = html.escape(job["Date Posted"])
+            company = html.escape(job["Company"]) if job["Company"] else ""
+            location = html.escape(job["Location"]) if job["Location"] else ""
+            date_posted = html.escape(job["Date Posted"]) if job["Date Posted"] and job["Date Posted"] != "N/A" else "Recent"
             keywords = html.escape(alert["keywords"])
             alert_location = html.escape(alert["location"])
+
+            if company and location:
+                company_line = f"<i>{company}</i> - {location}"
+            elif company:
+                company_line = f"<i>{company}</i>"
+            elif location:
+                company_line = location
+            else:
+                company_line = ""
 
             message = (
                 "🔔 <b>New Job Alert!</b>\n\n"
                 f"<b>{title}</b>\n"
-                f"<i>{company}</i> - {location}\n"
+                f"{company_line}\n"
                 f"Posted: {date_posted}\n\n"
                 f"From your alert for: <b>{keywords}</b> in "
                 f"<b>{alert_location}</b>"
