@@ -4473,14 +4473,16 @@ def get_jobbert_model():
                     logger.error(f"🚨 [CRITICAL] Insufficient memory to load model! Available: {sys_mem_avail:.1f}MB, Need: ~1000MB")
                     logger.warning("⚠️ System may hang or swap heavily. Attempting load anyway with swap...")
                     # Continue anyway since we now have swap space
-                logger.info(f"🔍 [DIAG] About to call SentenceTransformer('paraphrase-multilingual-mpnet-base-v2')...")
+                logger.info(f"🔍 [DIAG] About to call SentenceTransformer('TechWolf/JobBERT-v3')...")
                 model_load_start = time.time()
 
-                # Benchmarked 6 models on real production data:
-                # mpnet: 95% quality, 14.4ms/job, 0.568 discrimination gap, 1043MB
-                # JobBERT-v3 (prev): 84%, 14.4ms, 0.715 gap, 996MB
-                # bge-m3/e5-large: 47-53% quality (general models lump all job titles together)
-                _global_jobbert_model = SentenceTransformer("sentence-transformers/paraphrase-multilingual-mpnet-base-v2")
+                # JobBERT-v3 is the official TalentCLEF 2025 benchmark winner for
+                # cross-lingual job title matching. Multilingual (EN/DE/ES/ZH),
+                # trained on 21M job-title/skill pairs via contrastive learning.
+                # Benchmarked vs 6 alternatives: highest discrimination (gap=0.715)
+                # vs mpnet 0.568, bge-m3 0.287, e5-large 0.079. General-purpose
+                # models lump all job titles as similar — only domain training works.
+                _global_jobbert_model = SentenceTransformer("TechWolf/JobBERT-v3")
 
                 model_load_end = time.time()
                 resources_after_model = get_system_resources()
