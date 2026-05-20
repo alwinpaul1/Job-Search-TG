@@ -7155,7 +7155,9 @@ def check_single_alert(alert, bot: Bot):
                     job_posted_time = parse_date_posted_to_datetime(
                         job["Date Posted"]
                     )
-                    if job_posted_time < last_checked - timedelta(minutes=5):
+                    # 48h buffer: day-granularity dates from JobQuest need a wide
+                    # window; the sent_jobs DB check above is the real dedup guard
+                    if job_posted_time < last_checked - timedelta(hours=48):
                         recency_skipped += 1
                         continue
                 except Exception as e:
