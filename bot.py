@@ -7138,12 +7138,19 @@ def check_single_alert(alert, bot: Bot):
             canonical_company = canonical_text(job["Company"])
             canonical_location = canonical_text(job.get("Location", ""))
 
-            # Check for duplicates by job_id only (reposts get new IDs, so they come through)
+            # Dedup: same job_id, OR same canonical title+company within 14 days
+            # (cross-board: same posting may appear from LinkedIn + Indeed + Glassdoor with
+            # different IDs; 14-day window allows legitimate reposts beyond that)
             cursor.execute(
                 """SELECT 1 FROM sent_jobs WHERE
-                   chat_id = %s AND job_id = %s
+                   chat_id = %s AND (
+                       job_id = %s OR
+                       (canonical_title = %s AND canonical_company = %s
+                        AND canonical_title != '' AND canonical_company != ''
+                        AND sent_at > NOW() - INTERVAL '14 days')
+                   )
                    LIMIT 1""",
-                (alert["chat_id"], job_id)
+                (alert["chat_id"], job_id, canonical_title, canonical_company)
             )
             is_duplicate = cursor.fetchone() is not None
 
