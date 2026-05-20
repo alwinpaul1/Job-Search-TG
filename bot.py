@@ -5352,11 +5352,17 @@ def _jobquest_df_to_bot_jobs(df):
     for _, row in df.iterrows():
         link = str(row.get("job_url") or "")
         title = str(row.get("title") or "")
-        company = str(row.get("company") or "")
+        raw_company = row.get("company")
+        company = str(raw_company) if raw_company is not None and str(raw_company) != "nan" else ""
         loc = row.get("location")
         loc_str = str(loc) if loc and str(loc) != "nan" else ""
         dp = row.get("date_posted")
-        dp_str = str(dp.date()) if hasattr(dp, "date") else (str(dp) if dp else "N/A")
+        if dp is None or (hasattr(dp, "isoformat") and str(dp) == "NaT") or (isinstance(dp, float) and str(dp) == "nan"):
+            dp_str = "N/A"
+        elif hasattr(dp, "date") and str(dp) != "NaT":
+            dp_str = str(dp.date())
+        else:
+            dp_str = str(dp) if dp else "N/A"
         if not link or not title:
             continue
         jobs.append({
@@ -5956,7 +5962,7 @@ def setup_alert_threaded(query, context, keywords, location, prefs):
                 (alert_id, chat_id, job_link, job_id, job_title, company,
                  canonical_title, canonical_company, canonical_location, sent_at)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                ON CONFLICT (alert_id, job_link) DO NOTHING
+                ON CONFLICT (alert_id, job_id) DO NOTHING
             """, (
                 alert_id, chat_id, job["Link"], job_id, job["Title"],
                 job["Company"], canonical_title, canonical_company,
@@ -6796,7 +6802,7 @@ def update_alert_baseline_threaded(
                      company, canonical_title, canonical_company,
                      canonical_location, sent_at)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                    ON CONFLICT (alert_id, job_link) DO NOTHING
+                    ON CONFLICT (alert_id, job_id) DO NOTHING
                 """, job_data)
             conn.commit()
 
@@ -7254,7 +7260,7 @@ def check_single_alert(alert, bot: Bot):
                      company, canonical_title, canonical_company,
                      canonical_location, sent_at)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                    ON CONFLICT (alert_id, job_link) DO NOTHING
+                    ON CONFLICT (alert_id, job_id) DO NOTHING
                 """, job_data)
             logger.info(
                 "Sent and recorded %s new job(s) for alert ID %s.",
