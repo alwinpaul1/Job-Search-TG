@@ -5390,7 +5390,7 @@ def _format_relative_posted(dp):
         else:
             diff_s = (now - dp).total_seconds()
             if diff_s < 60:
-                return "just now"
+                return "Just now"
             if diff_s < 3600:
                 mins = int(diff_s // 60)
                 return f"{mins} minute{'s' if mins != 1 else ''} ago"
@@ -5402,15 +5402,21 @@ def _format_relative_posted(dp):
         # date-only (raw datetime.date object)
         days = (now.date() - dp).days
     if days == 0:
-        return "today"
+        return "Today"
     if days == 1:
-        return "yesterday"
+        return "Yesterday"
     if days < 7:
         return f"{days} days ago"
     if days < 30:
         weeks = days // 7
         return f"{weeks} week{'s' if weeks != 1 else ''} ago"
-    return dp.isoformat()[:10] if hasattr(dp, "isoformat") else str(dp)
+    # Older than a month: format as "20 May 2026" instead of "2026-05-20"
+    if hasattr(dp, "strftime"):
+        try:
+            return dp.strftime("%-d %B %Y")
+        except (ValueError, AttributeError):
+            return dp.strftime("%d %B %Y").lstrip("0")
+    return str(dp)
 
 
 def _jobquest_df_to_bot_jobs(df):
