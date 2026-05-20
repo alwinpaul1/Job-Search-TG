@@ -7747,7 +7747,7 @@ def main():
     try:
         bot_instance = Bot(token=token)
         
-        # Add memory-aware alert checking
+        # Add memory-aware alert checking (UTC-aware since scheduler uses UTC tz)
         scheduler.add_job(
             memory_aware_check_alerts,
             "interval",
@@ -7755,15 +7755,7 @@ def main():
             args=[bot_instance],
             max_instances=1,
             id="alert_checker",
-            next_run_time=datetime.now() + timedelta(seconds=20),
-        )
-        # Also run once at startup explicitly
-        scheduler.add_job(
-            memory_aware_check_alerts,
-            "date",
-            run_date=datetime.now() + timedelta(seconds=15),
-            args=[bot_instance],
-            id="alert_checker_initial",
+            next_run_time=datetime.now(pytz.UTC) + timedelta(seconds=20),
         )
         
         # Add periodic memory cleanup every 15 minutes
