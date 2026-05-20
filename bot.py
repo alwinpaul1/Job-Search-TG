@@ -3517,7 +3517,7 @@ def create_paginated_job_message(jobs, page):
         title = html.escape(job["Title"])
         company = html.escape(job["Company"]) if job["Company"] else ""
         location = html.escape(job["Location"]) if job["Location"] else ""
-        date_posted = html.escape(job["Date Posted"]) if job["Date Posted"] and job["Date Posted"] != "N/A" else "Recent"
+        date_posted = html.escape(job["Date Posted"]) if job["Date Posted"] and job["Date Posted"] != "N/A" else ""
         # Escape URL for safe use in HTML href attribute
         job_link = html.escape(job["Link"], quote=True)
 
@@ -3532,7 +3532,8 @@ def create_paginated_job_message(jobs, page):
 
         message_text += f"<b>{title}</b>\n"
         message_text += f"{company_line}\n"
-        message_text += f"Posted: {date_posted}\n"
+        if date_posted:
+            message_text += f"Posted: {date_posted}\n"
         message_text += f'<a href="{job_link}">View Job</a>\n\n'
 
     if not jobs[start_index:end_index]:
@@ -7185,7 +7186,7 @@ def check_single_alert(alert, bot: Bot):
             title = html.escape(job["Title"])
             company = html.escape(job["Company"]) if job["Company"] else ""
             location = html.escape(job["Location"]) if job["Location"] else ""
-            date_posted = html.escape(job["Date Posted"]) if job["Date Posted"] and job["Date Posted"] != "N/A" else "Recent"
+            date_posted = html.escape(job["Date Posted"]) if job["Date Posted"] and job["Date Posted"] != "N/A" else ""
             keywords = html.escape(alert["keywords"])
             alert_location = html.escape(alert["location"])
 
@@ -7198,11 +7199,13 @@ def check_single_alert(alert, bot: Bot):
             else:
                 company_line = ""
 
+            date_line = f"Posted: {date_posted}\n\n" if date_posted else "\n"
+
             message = (
                 "🔔 <b>New Job Alert!</b>\n\n"
                 f"<b>{title}</b>\n"
                 f"{company_line}\n"
-                f"Posted: {date_posted}\n\n"
+                f"{date_line}"
                 f"From your alert for: <b>{keywords}</b> in "
                 f"<b>{alert_location}</b>"
             )
