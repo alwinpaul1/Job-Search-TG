@@ -944,7 +944,9 @@ def parse_date_posted_to_datetime(date_str):
     if iso_match:
         try:
             y, mo, d = (int(iso_match.group(i)) for i in (1, 2, 3))
-            return datetime(y, mo, d, tzinfo=pytz.UTC)
+            # Use end-of-day so day-granularity dates pass the recency filter
+            # (last_checked is an exact timestamp; midnight would be "before" any same-day check)
+            return datetime(y, mo, d, 23, 59, 59, tzinfo=pytz.UTC)
         except (ValueError, OverflowError):
             pass
     return now  # Default to now if we can't parse it
@@ -7112,6 +7114,8 @@ def check_single_alert(alert, bot: Bot):
                 )
 
         jobs_to_send = []
+        duped = 0
+        recency_skipped = 0
         for job in found_jobs:
             job_id = canonical_link(job["Link"])
             canonical_title = canonical_text(job["Title"])
@@ -7127,33 +7131,37 @@ def check_single_alert(alert, bot: Bot):
             )
             is_duplicate = cursor.fetchone() is not None
 
-            if last_checked and not is_duplicate:
+            if is_duplicate:
+                duped += 1
+                continue
+
+            if last_checked:
                 try:
                     job_posted_time = parse_date_posted_to_datetime(
                         job["Date Posted"]
                     )
                     if job_posted_time < last_checked - timedelta(minutes=5):
-                        logger.debug(
-                            f"Skipping old job: {job['Title']} "
-                            f"(posted {job_posted_time}, "
-                            f"last checked {last_checked})"
-                        )
+                        recency_skipped += 1
                         continue
                 except Exception as e:
                     logger.warning(
                         f"Could not parse job date '{job['Date Posted']}': {e}"
                     )
 
-            if not is_duplicate:
-                # Store processed canonical data to avoid recomputation
-                job_with_meta = {
-                    **job,
-                    "_job_id": job_id,
-                    "_canonical_title": canonical_title,
-                    "_canonical_company": canonical_company,
-                    "_canonical_location": canonical_location
-                }
-                jobs_to_send.append(job_with_meta)
+            job_with_meta = {
+                **job,
+                "_job_id": job_id,
+                "_canonical_title": canonical_title,
+                "_canonical_company": canonical_company,
+                "_canonical_location": canonical_location
+            }
+            jobs_to_send.append(job_with_meta)
+
+        logger.info(
+            f"Alert {alert['id']}: {len(found_jobs)} scraped, "
+            f"{duped} duped, {recency_skipped} old, "
+            f"{len(jobs_to_send)} to send"
+        )
 
         new_jobs_to_insert_db = []
         for job in jobs_to_send:
