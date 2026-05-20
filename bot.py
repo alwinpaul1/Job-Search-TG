@@ -7748,13 +7748,15 @@ def main():
         bot_instance = Bot(token=token)
         
         # Add memory-aware alert checking (30 minutes for faster job detection)
+        # First run 30s after startup so deploy-and-verify is fast
         scheduler.add_job(
             memory_aware_check_alerts,
             "interval",
             minutes=30,  # Check alerts every 30 minutes
             args=[bot_instance],
             max_instances=1,
-            id="alert_checker"
+            id="alert_checker",
+            next_run_time=datetime.now() + timedelta(seconds=30),
         )
         
         # Add periodic memory cleanup every 15 minutes
