@@ -7192,23 +7192,28 @@ def check_single_alert(alert, bot: Bot):
             canonical_company = canonical_text(job["Company"])
             canonical_location = canonical_text(job.get("Location", ""))
 
-            # Dedup: same job_id, OR same title+company-root within 14 days.
-            # company-root = first word of canonical_company (>= 4 chars to avoid
-            # collisions on short abbreviations). Catches cases like
-            # "Scalable Capital" vs "Scalable GmbH" vs "Scalable Press" — same
-            # employer recorded under different legal/brand names across boards.
+            # Dedup paths within 14 days:
+            #   1) same job_id (most precise)
+            #   2) same title + exact canonical_company (catches short names like
+            #      KLA, SAP, BMW, IBM that the first-word path filters out)
+            #   3) same title + first word of canonical_company (>= 4 chars) —
+            #      catches "Scalable Capital" / "Scalable GmbH" / "Scalable Press"
             cursor.execute(
                 """SELECT 1 FROM sent_jobs WHERE
                    chat_id = %s AND (
                        job_id = %s OR
                        (canonical_title = %s
-                        AND split_part(canonical_company, ' ', 1) = split_part(%s, ' ', 1)
-                        AND length(split_part(canonical_company, ' ', 1)) >= 4
-                        AND canonical_title != '' AND canonical_company != ''
-                        AND sent_at > NOW() - INTERVAL '14 days')
+                        AND canonical_title != ''
+                        AND canonical_company != ''
+                        AND sent_at > NOW() - INTERVAL '14 days'
+                        AND (
+                            canonical_company = %s
+                            OR (length(split_part(canonical_company, ' ', 1)) >= 4
+                                AND split_part(canonical_company, ' ', 1) = split_part(%s, ' ', 1))
+                        ))
                    )
                    LIMIT 1""",
-                (alert["chat_id"], job_id, canonical_title, canonical_company)
+                (alert["chat_id"], job_id, canonical_title, canonical_company, canonical_company)
             )
             is_duplicate = cursor.fetchone() is not None
 
