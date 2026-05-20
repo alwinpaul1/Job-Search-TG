@@ -919,7 +919,19 @@ def parse_date_posted_to_datetime(date_str):
     date_str = date_str.lower().strip()
     now = datetime.now(pytz.UTC)
 
+    # Relative shortcuts
+    if date_str in ("just now", "now"):
+        return now
+    if date_str == "today":
+        return now
+    if date_str == "yesterday":
+        return now - timedelta(days=1)
+
     # Handle various formats
+    if "minute" in date_str:
+        m = re.search(r"\d+", date_str)
+        n = int(m.group()) if m else 1
+        return now - timedelta(minutes=n)
     if "hour" in date_str:
         hours_match = re.search(r"\d+", date_str)
         hours = int(hours_match.group()) if hours_match else 1
@@ -5354,6 +5366,53 @@ def _bot_filters_to_jobquest_kwargs(filters_dict):
     return kw, job_types
 
 
+def _format_relative_posted(dp):
+    """Format a date/datetime as a human-readable relative time like LinkedIn.
+
+    LinkedIn provides hour-level precision (minutes/hours), Indeed and Glassdoor
+    are day-level only. Returns:
+        "just now" | "X minutes ago" | "X hours ago" | "today" | "yesterday"
+        | "X days ago" | "X weeks ago" | "YYYY-MM-DD" (>= 30 days)
+    """
+    if dp is None or (hasattr(dp, "isoformat") and str(dp) == "NaT") or (isinstance(dp, float) and str(dp) == "nan"):
+        return "N/A"
+    now = datetime.now()
+    if hasattr(dp, "hour") and hasattr(dp, "minute"):
+        # Datetime (LinkedIn) or pandas Timestamp — may have hour precision
+        if hasattr(dp, "to_pydatetime"):
+            dp = dp.to_pydatetime()
+        if dp.tzinfo is not None:
+            dp = dp.replace(tzinfo=None)
+        # Indeed and Glassdoor return midnight (00:00:00) — they don't have
+        # real hour info. Treat midnight timestamps as date-only.
+        if dp.hour == 0 and dp.minute == 0 and dp.second == 0:
+            days = (now.date() - dp.date()).days
+        else:
+            diff_s = (now - dp).total_seconds()
+            if diff_s < 60:
+                return "just now"
+            if diff_s < 3600:
+                mins = int(diff_s // 60)
+                return f"{mins} minute{'s' if mins != 1 else ''} ago"
+            if diff_s < 86400:
+                hours = int(diff_s // 3600)
+                return f"{hours} hour{'s' if hours != 1 else ''} ago"
+            days = int(diff_s // 86400)
+    else:
+        # date-only (raw datetime.date object)
+        days = (now.date() - dp).days
+    if days == 0:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    if days < 7:
+        return f"{days} days ago"
+    if days < 30:
+        weeks = days // 7
+        return f"{weeks} week{'s' if weeks != 1 else ''} ago"
+    return dp.isoformat()[:10] if hasattr(dp, "isoformat") else str(dp)
+
+
 def _jobquest_df_to_bot_jobs(df):
     """Translate JobQuest DataFrame rows → bot's dict-of-strings shape."""
     if df is None or len(df) == 0:
@@ -5367,12 +5426,7 @@ def _jobquest_df_to_bot_jobs(df):
         loc = row.get("location")
         loc_str = str(loc) if loc and str(loc) != "nan" else ""
         dp = row.get("date_posted")
-        if dp is None or (hasattr(dp, "isoformat") and str(dp) == "NaT") or (isinstance(dp, float) and str(dp) == "nan"):
-            dp_str = "N/A"
-        elif hasattr(dp, "date") and str(dp) != "NaT":
-            dp_str = str(dp.date())
-        else:
-            dp_str = str(dp) if dp else "N/A"
+        dp_str = _format_relative_posted(dp)
         if not link or not title:
             continue
         jobs.append({
