@@ -38,3 +38,10 @@ jobs/
 # CSV files (job search results)
 *.csv
 linkedin_jobs_*.csv
+
+# Cloned external repos (kept here for local development, tracked separately)
+JobQuest/
+Scrapling/
+
+# Local development tests
+test_scrape_pipeline.py
