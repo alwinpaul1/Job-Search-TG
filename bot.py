@@ -5524,9 +5524,18 @@ def _record_scrape_duration(keyword, location, duration, per_site):
 
 
 def adapt_scrape_depth(keyword, location, scraped, new_count):
-    """Feedback controller. Grow depth while a full scrape keeps yielding new jobs
-    AND there's time-budget headroom; shrink when saturated by dupes or the board
-    is exhausted. Ceiling derived from time budget ÷ measured per-job latency."""
+    """Feedback controller. Each alert scrapes as deep as its per-alert time
+    budget allows, climbing one page per cycle toward that budget ceiling and
+    holding there. The budget (_per_alert_budget_s ÷ measured per-job latency)
+    already guarantees the whole cycle fits the scheduler interval, so it is the
+    only bound — no hardcoded caps.
+
+    Why ramp to the ceiling instead of growing only when new jobs appear: fresh
+    jobs are often buried *below* the already-sent results at the top of a board
+    (a heavy sent-history makes the top-N all dupes). A controller that retreats
+    on dupe-saturation never digs deep enough to reach them, so the alert goes
+    silent even while new postings exist. Climbing to the budget ceiling surfaces
+    those buried-deep jobs; `scraped`/`new_count` are kept for logging only."""
     st = _alert_scrape_state.setdefault(
         _scrape_key(keyword, location),
         {"depth": _SCRAPE_PAGE, "ema_dur": None, "sec_per_job": None},
@@ -5538,11 +5547,10 @@ def adapt_scrape_depth(keyword, location, scraped, new_count):
         ceiling = max(floor, int(_per_alert_budget_s() / st["sec_per_job"]))
     else:
         ceiling = d + _SCRAPE_PAGE  # unknown latency yet — allow one page of growth
-    board_exhausted = scraped < d        # got fewer than requested → no more jobs there
-    if (not board_exhausted) and new_count >= max(2, d * 0.3):
-        st["depth"] = min(d + _SCRAPE_PAGE, ceiling)   # productive + has more → deeper
-    elif new_count == 0 or board_exhausted:
-        st["depth"] = max(d - _SCRAPE_PAGE // 2, floor)  # saturated/exhausted → ease off
+    if d < ceiling:
+        st["depth"] = min(d + _SCRAPE_PAGE, ceiling)   # climb toward budget ceiling
+    else:
+        st["depth"] = ceiling                          # budget shrank → ease down
     st["depth"] = max(floor, min(st["depth"], ceiling))
     if st["depth"] != d:
         logger.info(f"🔍 [SCRAPE_ADAPT] '{keyword}'@'{location}': depth {d}→{st['depth']} "
@@ -5642,18 +5650,36 @@ def scrape_linkedin_with_adaptive_jobbert(
     )
     scrape_duration = time.time() - scrape_start
 
+    # Cross-board in-scrape dedup. Collapse the same job appearing on several
+    # boards, and when it does, keep the LinkedIn listing so the user gets the
+    # LinkedIn link (not Indeed/Glassdoor). Only treat title+company as the same
+    # job when BOTH are non-empty — otherwise distinct jobs with a missing
+    # company would wrongly collapse and silently drop real postings.
+    def _is_linkedin(link):
+        return "linkedin.com" in (link or "").lower()
+
     seen_job_ids = set()
-    seen_canonical_pairs = set()
+    seen_pairs = {}            # (c_title, c_company) -> index in `deduped`
     deduped = []
     for job_data in all_scraped_jobs:
         job_id = canonical_link(job_data["Link"])
+        if job_id in seen_job_ids:
+            continue
         c_title = canonical_text(job_data["Title"])
         c_company = canonical_text(job_data["Company"])
-        pair = (c_title, c_company)
-        if job_id in seen_job_ids or pair in seen_canonical_pairs:
+        pair = (c_title, c_company) if (c_title and c_company) else None
+        if pair is not None and pair in seen_pairs:
+            # same job already kept from another board — upgrade to the LinkedIn
+            # copy if this one is LinkedIn and the kept one is not
+            idx = seen_pairs[pair]
+            if _is_linkedin(job_data["Link"]) and not _is_linkedin(deduped[idx]["Link"]):
+                seen_job_ids.discard(canonical_link(deduped[idx]["Link"]))
+                seen_job_ids.add(job_id)
+                deduped[idx] = job_data
             continue
         seen_job_ids.add(job_id)
-        seen_canonical_pairs.add(pair)
+        if pair is not None:
+            seen_pairs[pair] = len(deduped)
         deduped.append(job_data)
     all_scraped_jobs = deduped
 
