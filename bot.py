@@ -5452,31 +5452,58 @@ def _jobquest_df_to_bot_jobs(df):
     return jobs
 
 
-def _jobquest_scrape_multi_board(keyword, location, filters_dict, results_wanted=15):
+def _dynamic_scrape_params(base_kw, job_types):
+    """Compute scrape depth + timeout dynamically per alert.
+
+    Depth scales with how many jobs realistically exist to dig through:
+      - Wider date windows accumulate more reposts/already-sent jobs at the top,
+        so we must scrape deeper to reach genuinely new postings.
+      - Narrow windows are already fresh, so shallow scrapes suffice (and stay fast).
+      - Niche queries (job_type-filtered fan-out) deep-paginate slowly on LinkedIn,
+        so we cap depth lower and rely on the timeout.
+    Timeout scales with depth (~1.8s/result observed) so deeper scrapes get more
+    room while shallow ones finish fast and never block the cycle.
+    """
+    hours_old = base_kw.get("hours_old")
+    if hours_old is None:
+        depth = 40                 # no date filter — moderate
+    elif hours_old <= 24:
+        depth = 25                 # last 24h — fresh, shallow is enough
+    elif hours_old <= 168:
+        depth = 50                 # last week — dig past reposts
+    else:
+        depth = 60                 # last month+ — deepest pool
+    # job_type fan-out splits LinkedIn into its own slow branch; keep it lighter
+    if job_types and 1 <= len(job_types) < 4:
+        depth = min(depth, 35)
+    timeout = max(45, min(150, int(depth * 2.2)))
+    return depth, timeout
+
+
+def _jobquest_scrape_multi_board(keyword, location, filters_dict, results_wanted=None):
     """Drop-in replacement for the LinkedIn-only scrape loop.
 
     Multi-board (LinkedIn + Indeed + Glassdoor) with fan-out on multi-select job_types.
     Returns list of dicts in the bot's expected shape.
 
-    Note: per-site cap at min(results_wanted, 50) for maximum coverage. Measured
-    on real data: per_site=10 surfaced 0 new LinkedIn jobs, 25 → 12, 50 → 23 new
-    LinkedIn + 69 new Indeed. Beyond 50 the scrape exceeds the timeout and
-    Glassdoor 403-blocks (caps ~30). With a 7-day window LinkedIn's top results
-    are saturated with reposts/already-sent jobs, so depth is needed to reach
-    genuinely new postings. 90s timeout accommodates the deeper scrape (~56s);
-    the scheduler's max_instances=1 safely skips any overlapping run.
+    Scrape depth and timeout are computed dynamically per alert via
+    _dynamic_scrape_params (based on the date window and job-type fan-out) rather
+    than hardcoded — wider windows scrape deeper, narrow/niche ones stay shallow
+    and fast. The scheduler's max_instances=1 safely skips any overlapping run.
     """
     from jobquest import scrape_jobs
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as _Timeout
     import pandas as _pd
 
     base_kw, job_types = _bot_filters_to_jobquest_kwargs(filters_dict or {})
-    per_site = min(results_wanted, 50)
+    depth, TIMEOUT = _dynamic_scrape_params(base_kw, job_types)
+    per_site = min(results_wanted, depth) if results_wanted else depth
     common = dict(search_term=keyword, location=location, results_wanted=per_site,
                   country_indeed="germany", verbose=0, **base_kw)
+    logger.info(f"🔍 [SCRAPE_PARAMS] per_site={per_site} timeout={TIMEOUT}s "
+                f"hours_old={base_kw.get('hours_old')} job_types={len(job_types)}")
 
     sites = ["linkedin", "indeed", "glassdoor"]
-    TIMEOUT = 90
     try:
         if not job_types or len(job_types) >= 4:
             with ThreadPoolExecutor(max_workers=1) as exe:
@@ -5532,7 +5559,9 @@ def scrape_linkedin_with_adaptive_jobbert(
             ParseMode.MARKDOWN
         )
 
-    results_wanted = (max_pages * 25) if max_pages else 50
+    # results_wanted only set as a ceiling when caller forces max_pages;
+    # otherwise depth is computed dynamically inside the scrape function.
+    results_wanted = (max_pages * 25) if max_pages else None
     scrape_start = time.time()
     all_scraped_jobs = _jobquest_scrape_multi_board(
         keyword, location, filters_dict or {}, results_wanted=results_wanted
