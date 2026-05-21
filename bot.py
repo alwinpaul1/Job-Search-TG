@@ -5452,16 +5452,41 @@ def _jobquest_df_to_bot_jobs(df):
     return jobs
 
 
-# Per-alert adaptive scrape state — a feedback loop, no hardcoded depth/timeout.
-# Keyed by keyword+location. In-memory (re-learns within a few cycles after restart).
-#   depth   — how many results/site to pull; grows when a full scrape still yields
-#             many new jobs (more beyond our depth), shrinks when saturated by dupes.
-#   ema_dur — exponential moving average of measured scrape wall-time; the timeout
-#             is derived from it (real latency), not a fixed constant.
+# Per-alert adaptive scrape state — a feedback loop with NO hardcoded depth caps.
+# Bounds are derived from real signals, not magic numbers:
+#   floor   = one scrape page (a real API page size, the smallest useful request)
+#   ceiling = how many jobs fit in this alert's time budget, computed from the
+#             scheduler interval ÷ active-alert count ÷ measured per-job latency
+#   start   = floor (begin minimal, grow only as a query proves it needs depth)
+# State per keyword+location (in-memory, re-learns within a few cycles after restart):
+#   depth        — results/site to pull next time
+#   ema_dur      — EMA of measured scrape wall-time (drives the timeout)
+#   sec_per_job  — EMA of measured per-result latency (drives the depth ceiling)
 _alert_scrape_state = {}
-_SCRAPE_DEPTH_MIN = 20
-_SCRAPE_DEPTH_MAX = 120
-_SCRAPE_DEPTH_START = 30
+_SCRAPE_PAGE = 25                  # LinkedIn guest API returns 25/page; the natural unit
+_SCHEDULER_INTERVAL_S = 30 * 60    # alert-check interval (see scheduler add_job)
+_active_alert_cache = {"n": 1, "ts": 0}
+
+
+def _active_alert_count():
+    """Cached count of active alerts (refreshed every 5 min) — drives time budget."""
+    now = time.time()
+    if now - _active_alert_cache["ts"] > 300:
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM alerts WHERE is_active = 1")
+            _active_alert_cache["n"] = max(1, cur.fetchone()[0])
+            _active_alert_cache["ts"] = now
+            db_pool.return_connection(conn)
+        except Exception:
+            pass
+    return _active_alert_cache["n"]
+
+
+def _per_alert_budget_s():
+    """Each alert's fair share of the cycle, 70% of interval split across alerts."""
+    return (_SCHEDULER_INTERVAL_S * 0.7) / _active_alert_count()
 
 
 def _scrape_key(keyword, location):
@@ -5471,36 +5496,53 @@ def _scrape_key(keyword, location):
 def _scrape_plan(keyword, location):
     """Return (depth, timeout) for this alert from learned state."""
     st = _alert_scrape_state.setdefault(
-        _scrape_key(keyword, location), {"depth": _SCRAPE_DEPTH_START, "ema_dur": None}
+        _scrape_key(keyword, location),
+        {"depth": _SCRAPE_PAGE, "ema_dur": None, "sec_per_job": None},
     )
     depth = st["depth"]
-    # Timeout derived from measured latency with a 2.5x growth margin (depth may
-    # rise next cycle). Generous default before we have a measurement.
-    timeout = int(max(60, min(180, st["ema_dur"] * 2.5))) if st["ema_dur"] else 120
+    # Timeout = measured wall-time × 2.5 margin; budget-sized default before we
+    # have a measurement (never less than 60s, never blocks longer than the budget).
+    if st["ema_dur"]:
+        timeout = int(max(60, st["ema_dur"] * 2.5))
+    else:
+        timeout = int(max(60, _per_alert_budget_s()))
     return depth, timeout
 
 
-def _record_scrape_duration(keyword, location, duration):
+def _record_scrape_duration(keyword, location, duration, per_site):
     st = _alert_scrape_state.setdefault(
-        _scrape_key(keyword, location), {"depth": _SCRAPE_DEPTH_START, "ema_dur": None}
+        _scrape_key(keyword, location),
+        {"depth": _SCRAPE_PAGE, "ema_dur": None, "sec_per_job": None},
     )
     st["ema_dur"] = duration if st["ema_dur"] is None else 0.6 * st["ema_dur"] + 0.4 * duration
+    spj = duration / max(1, per_site)
+    st["sec_per_job"] = spj if st["sec_per_job"] is None else 0.6 * st["sec_per_job"] + 0.4 * spj
 
 
 def adapt_scrape_depth(keyword, location, scraped, new_count):
-    """Feedback: grow depth if a full scrape still yields many new jobs (pool has
-    more beyond our reach); shrink if saturated by duplicates. Called post-dedup."""
+    """Feedback controller. Grow depth while a full scrape keeps yielding new jobs
+    AND there's time-budget headroom; shrink when saturated by dupes or the board
+    is exhausted. Ceiling derived from time budget ÷ measured per-job latency."""
     st = _alert_scrape_state.setdefault(
-        _scrape_key(keyword, location), {"depth": _SCRAPE_DEPTH_START, "ema_dur": None}
+        _scrape_key(keyword, location),
+        {"depth": _SCRAPE_PAGE, "ema_dur": None, "sec_per_job": None},
     )
     d = st["depth"]
-    if scraped >= d * 0.9 and new_count >= max(2, d * 0.3):
-        st["depth"] = min(d + 20, _SCRAPE_DEPTH_MAX)
-    elif new_count <= max(1, d * 0.05):
-        st["depth"] = max(d - 10, _SCRAPE_DEPTH_MIN)
+    floor = _SCRAPE_PAGE
+    # Dynamic ceiling: how many results we can afford within the time budget.
+    if st["sec_per_job"]:
+        ceiling = max(floor, int(_per_alert_budget_s() / st["sec_per_job"]))
+    else:
+        ceiling = d + _SCRAPE_PAGE  # unknown latency yet — allow one page of growth
+    board_exhausted = scraped < d        # got fewer than requested → no more jobs there
+    if (not board_exhausted) and new_count >= max(2, d * 0.3):
+        st["depth"] = min(d + _SCRAPE_PAGE, ceiling)   # productive + has more → deeper
+    elif new_count == 0 or board_exhausted:
+        st["depth"] = max(d - _SCRAPE_PAGE // 2, floor)  # saturated/exhausted → ease off
+    st["depth"] = max(floor, min(st["depth"], ceiling))
     if st["depth"] != d:
         logger.info(f"🔍 [SCRAPE_ADAPT] '{keyword}'@'{location}': depth {d}→{st['depth']} "
-                    f"(scraped={scraped}, new={new_count})")
+                    f"(scraped={scraped}, new={new_count}, ceiling={ceiling})")
     return st["depth"]
 
 
@@ -5553,12 +5595,12 @@ def _jobquest_scrape_multi_board(keyword, location, filters_dict, results_wanted
             df = _pd.concat(dfs).drop_duplicates(subset=["job_url"]).reset_index(drop=True) if dfs else _pd.DataFrame()
     except _Timeout:
         logger.warning(f"JobQuest scrape timed out after {TIMEOUT}s for '{keyword}' in '{location}'")
-        _record_scrape_duration(keyword, location, TIMEOUT)
+        _record_scrape_duration(keyword, location, TIMEOUT, per_site)
         return []
     except Exception as e:
         logger.error(f"JobQuest scrape failed: {e}", exc_info=True)
         return []
-    _record_scrape_duration(keyword, location, _time.time() - _scrape_t0)
+    _record_scrape_duration(keyword, location, _time.time() - _scrape_t0, per_site)
     return _jobquest_df_to_bot_jobs(df)
 
 
