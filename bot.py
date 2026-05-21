@@ -5472,15 +5472,21 @@ def _active_alert_count():
     """Cached count of active alerts (refreshed every 5 min) — drives time budget."""
     now = time.time()
     if now - _active_alert_cache["ts"] > 300:
+        conn = None
         try:
             conn = get_db_connection()
             cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM alerts WHERE is_active = 1")
-            _active_alert_cache["n"] = max(1, cur.fetchone()[0])
+            cur.execute("SELECT COUNT(*) AS c FROM alerts WHERE is_active = 1")
+            row = cur.fetchone()
+            # get_db_connection uses RealDictCursor → row is a dict
+            count = row["c"] if isinstance(row, dict) else row[0]
+            _active_alert_cache["n"] = max(1, int(count))
             _active_alert_cache["ts"] = now
-            db_pool.return_connection(conn)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"active_alert_count query failed: {e}")
+        finally:
+            if conn:
+                db_pool.return_connection(conn)
     return _active_alert_cache["n"]
 
 
@@ -5500,12 +5506,10 @@ def _scrape_plan(keyword, location):
         {"depth": _SCRAPE_PAGE, "ema_dur": None, "sec_per_job": None},
     )
     depth = st["depth"]
-    # Timeout = measured wall-time × 2.5 margin; budget-sized default before we
-    # have a measurement (never less than 60s, never blocks longer than the budget).
-    if st["ema_dur"]:
-        timeout = int(max(60, st["ema_dur"] * 2.5))
-    else:
-        timeout = int(max(60, _per_alert_budget_s()))
+    # Timeout = measured wall-time × 2.5 margin, clamped [60,180]s. A single
+    # scrape never needs longer (the board exhausts well before that); the time
+    # budget governs depth, not timeout. 120s default before first measurement.
+    timeout = int(max(60, min(180, st["ema_dur"] * 2.5))) if st["ema_dur"] else 120
     return depth, timeout
 
 
