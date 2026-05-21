@@ -961,6 +961,17 @@ def parse_date_posted_to_datetime(date_str):
             return datetime(y, mo, d, 23, 59, 59, tzinfo=pytz.UTC)
         except (ValueError, OverflowError):
             pass
+    # Absolute "DD Month YYYY" / "Month DD, YYYY" — the format _format_relative_posted
+    # emits for jobs older than 30 days. Without this branch these fall through to the
+    # `return now` default and wrongly pass the recency filter as if freshly posted,
+    # so deep scrapes would spam months-old listings. strptime month names are
+    # case-insensitive, which matches the lowercased date_str above.
+    for fmt in ("%d %B %Y", "%d %b %Y", "%B %d, %Y", "%b %d, %Y", "%B %d %Y", "%b %d %Y"):
+        try:
+            dt = datetime.strptime(date_str, fmt)
+            return dt.replace(hour=23, minute=59, second=59, tzinfo=pytz.UTC)
+        except ValueError:
+            continue
     return now  # Default to now if we can't parse it
 
 
