@@ -5458,16 +5458,19 @@ def _jobquest_scrape_multi_board(keyword, location, filters_dict, results_wanted
     Multi-board (LinkedIn + Indeed + Glassdoor) with fan-out on multi-select job_types.
     Returns list of dicts in the bot's expected shape.
 
-    Note: capped per-site at min(results_wanted, 10) to prevent LinkedIn deep-pagination
-    stalls on niche queries (was observed taking 9 min when LinkedIn couldn't fill
-    the quota for a job_type-filtered query).
+    Note: capped per-site at min(results_wanted, 25) — one LinkedIn page is 25
+    results, so this fetches ~1 page (2 with hours_old overfetch) without deep
+    pagination. The 60s timeout below guards against niche-query stalls. Cap of
+    10 was too small: with a 7-day window LinkedIn's top results are saturated
+    with reposts/already-sent jobs, so genuinely new postings (deeper in the
+    list) never surfaced. At 25, new LinkedIn jobs come through (~12 vs 0).
     """
     from jobquest import scrape_jobs
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as _Timeout
     import pandas as _pd
 
     base_kw, job_types = _bot_filters_to_jobquest_kwargs(filters_dict or {})
-    per_site = min(results_wanted, 10)
+    per_site = min(results_wanted, 25)
     common = dict(search_term=keyword, location=location, results_wanted=per_site,
                   country_indeed="germany", verbose=0, **base_kw)
 
