@@ -5458,24 +5458,25 @@ def _jobquest_scrape_multi_board(keyword, location, filters_dict, results_wanted
     Multi-board (LinkedIn + Indeed + Glassdoor) with fan-out on multi-select job_types.
     Returns list of dicts in the bot's expected shape.
 
-    Note: capped per-site at min(results_wanted, 25) — one LinkedIn page is 25
-    results, so this fetches ~1 page (2 with hours_old overfetch) without deep
-    pagination. The 60s timeout below guards against niche-query stalls. Cap of
-    10 was too small: with a 7-day window LinkedIn's top results are saturated
-    with reposts/already-sent jobs, so genuinely new postings (deeper in the
-    list) never surfaced. At 25, new LinkedIn jobs come through (~12 vs 0).
+    Note: per-site cap at min(results_wanted, 50) for maximum coverage. Measured
+    on real data: per_site=10 surfaced 0 new LinkedIn jobs, 25 → 12, 50 → 23 new
+    LinkedIn + 69 new Indeed. Beyond 50 the scrape exceeds the timeout and
+    Glassdoor 403-blocks (caps ~30). With a 7-day window LinkedIn's top results
+    are saturated with reposts/already-sent jobs, so depth is needed to reach
+    genuinely new postings. 90s timeout accommodates the deeper scrape (~56s);
+    the scheduler's max_instances=1 safely skips any overlapping run.
     """
     from jobquest import scrape_jobs
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as _Timeout
     import pandas as _pd
 
     base_kw, job_types = _bot_filters_to_jobquest_kwargs(filters_dict or {})
-    per_site = min(results_wanted, 25)
+    per_site = min(results_wanted, 50)
     common = dict(search_term=keyword, location=location, results_wanted=per_site,
                   country_indeed="germany", verbose=0, **base_kw)
 
     sites = ["linkedin", "indeed", "glassdoor"]
-    TIMEOUT = 60
+    TIMEOUT = 90
     try:
         if not job_types or len(job_types) >= 4:
             with ThreadPoolExecutor(max_workers=1) as exe:
@@ -5531,7 +5532,7 @@ def scrape_linkedin_with_adaptive_jobbert(
             ParseMode.MARKDOWN
         )
 
-    results_wanted = (max_pages * 25) if max_pages else 25
+    results_wanted = (max_pages * 25) if max_pages else 50
     scrape_start = time.time()
     all_scraped_jobs = _jobquest_scrape_multi_board(
         keyword, location, filters_dict or {}, results_wanted=results_wanted
