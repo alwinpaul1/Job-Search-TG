@@ -5452,32 +5452,56 @@ def _jobquest_df_to_bot_jobs(df):
     return jobs
 
 
-def _dynamic_scrape_params(base_kw, job_types):
-    """Compute scrape depth + timeout dynamically per alert.
+# Per-alert adaptive scrape state — a feedback loop, no hardcoded depth/timeout.
+# Keyed by keyword+location. In-memory (re-learns within a few cycles after restart).
+#   depth   — how many results/site to pull; grows when a full scrape still yields
+#             many new jobs (more beyond our depth), shrinks when saturated by dupes.
+#   ema_dur — exponential moving average of measured scrape wall-time; the timeout
+#             is derived from it (real latency), not a fixed constant.
+_alert_scrape_state = {}
+_SCRAPE_DEPTH_MIN = 20
+_SCRAPE_DEPTH_MAX = 120
+_SCRAPE_DEPTH_START = 30
 
-    Depth scales with how many jobs realistically exist to dig through:
-      - Wider date windows accumulate more reposts/already-sent jobs at the top,
-        so we must scrape deeper to reach genuinely new postings.
-      - Narrow windows are already fresh, so shallow scrapes suffice (and stay fast).
-      - Niche queries (job_type-filtered fan-out) deep-paginate slowly on LinkedIn,
-        so we cap depth lower and rely on the timeout.
-    Timeout scales with depth (~1.8s/result observed) so deeper scrapes get more
-    room while shallow ones finish fast and never block the cycle.
-    """
-    hours_old = base_kw.get("hours_old")
-    if hours_old is None:
-        depth = 40                 # no date filter — moderate
-    elif hours_old <= 24:
-        depth = 25                 # last 24h — fresh, shallow is enough
-    elif hours_old <= 168:
-        depth = 50                 # last week — dig past reposts
-    else:
-        depth = 60                 # last month+ — deepest pool
-    # job_type fan-out splits LinkedIn into its own slow branch; keep it lighter
-    if job_types and 1 <= len(job_types) < 4:
-        depth = min(depth, 35)
-    timeout = max(45, min(150, int(depth * 2.2)))
+
+def _scrape_key(keyword, location):
+    return f"{(keyword or '').strip().lower()}|{(location or '').strip().lower()}"
+
+
+def _scrape_plan(keyword, location):
+    """Return (depth, timeout) for this alert from learned state."""
+    st = _alert_scrape_state.setdefault(
+        _scrape_key(keyword, location), {"depth": _SCRAPE_DEPTH_START, "ema_dur": None}
+    )
+    depth = st["depth"]
+    # Timeout derived from measured latency with a 2.5x growth margin (depth may
+    # rise next cycle). Generous default before we have a measurement.
+    timeout = int(max(60, min(180, st["ema_dur"] * 2.5))) if st["ema_dur"] else 120
     return depth, timeout
+
+
+def _record_scrape_duration(keyword, location, duration):
+    st = _alert_scrape_state.setdefault(
+        _scrape_key(keyword, location), {"depth": _SCRAPE_DEPTH_START, "ema_dur": None}
+    )
+    st["ema_dur"] = duration if st["ema_dur"] is None else 0.6 * st["ema_dur"] + 0.4 * duration
+
+
+def adapt_scrape_depth(keyword, location, scraped, new_count):
+    """Feedback: grow depth if a full scrape still yields many new jobs (pool has
+    more beyond our reach); shrink if saturated by duplicates. Called post-dedup."""
+    st = _alert_scrape_state.setdefault(
+        _scrape_key(keyword, location), {"depth": _SCRAPE_DEPTH_START, "ema_dur": None}
+    )
+    d = st["depth"]
+    if scraped >= d * 0.9 and new_count >= max(2, d * 0.3):
+        st["depth"] = min(d + 20, _SCRAPE_DEPTH_MAX)
+    elif new_count <= max(1, d * 0.05):
+        st["depth"] = max(d - 10, _SCRAPE_DEPTH_MIN)
+    if st["depth"] != d:
+        logger.info(f"🔍 [SCRAPE_ADAPT] '{keyword}'@'{location}': depth {d}→{st['depth']} "
+                    f"(scraped={scraped}, new={new_count})")
+    return st["depth"]
 
 
 def _jobquest_scrape_multi_board(keyword, location, filters_dict, results_wanted=None):
@@ -5486,22 +5510,24 @@ def _jobquest_scrape_multi_board(keyword, location, filters_dict, results_wanted
     Multi-board (LinkedIn + Indeed + Glassdoor) with fan-out on multi-select job_types.
     Returns list of dicts in the bot's expected shape.
 
-    Scrape depth and timeout are computed dynamically per alert via
-    _dynamic_scrape_params (based on the date window and job-type fan-out) rather
-    than hardcoded — wider windows scrape deeper, narrow/niche ones stay shallow
-    and fast. The scheduler's max_instances=1 safely skips any overlapping run.
+    Depth and timeout are fully dynamic via a per-alert feedback loop
+    (_scrape_plan / adapt_scrape_depth): depth grows while a full scrape keeps
+    finding new jobs and shrinks once saturated; timeout tracks measured latency.
+    No hardcoded caps. The scheduler's max_instances=1 skips overlapping runs.
     """
     from jobquest import scrape_jobs
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as _Timeout
     import pandas as _pd
+    import time as _time
 
     base_kw, job_types = _bot_filters_to_jobquest_kwargs(filters_dict or {})
-    depth, TIMEOUT = _dynamic_scrape_params(base_kw, job_types)
+    depth, TIMEOUT = _scrape_plan(keyword, location)
     per_site = min(results_wanted, depth) if results_wanted else depth
     common = dict(search_term=keyword, location=location, results_wanted=per_site,
                   country_indeed="germany", verbose=0, **base_kw)
     logger.info(f"🔍 [SCRAPE_PARAMS] per_site={per_site} timeout={TIMEOUT}s "
                 f"hours_old={base_kw.get('hours_old')} job_types={len(job_types)}")
+    _scrape_t0 = _time.time()
 
     sites = ["linkedin", "indeed", "glassdoor"]
     try:
@@ -5527,10 +5553,12 @@ def _jobquest_scrape_multi_board(keyword, location, filters_dict, results_wanted
             df = _pd.concat(dfs).drop_duplicates(subset=["job_url"]).reset_index(drop=True) if dfs else _pd.DataFrame()
     except _Timeout:
         logger.warning(f"JobQuest scrape timed out after {TIMEOUT}s for '{keyword}' in '{location}'")
+        _record_scrape_duration(keyword, location, TIMEOUT)
         return []
     except Exception as e:
         logger.error(f"JobQuest scrape failed: {e}", exc_info=True)
         return []
+    _record_scrape_duration(keyword, location, _time.time() - _scrape_t0)
     return _jobquest_df_to_bot_jobs(df)
 
 
@@ -7299,6 +7327,16 @@ def check_single_alert(alert, bot: Bot):
             f"{duped} duped, {recency_skipped} old, "
             f"{len(jobs_to_send)} to send"
         )
+
+        # Feedback to the adaptive scrape loop: if a full scrape still yields many
+        # new jobs, deepen next cycle; if saturated by dupes, ease off.
+        try:
+            adapt_scrape_depth(
+                alert["keywords"], alert["location"],
+                len(found_jobs), len(jobs_to_send)
+            )
+        except Exception:
+            pass
 
         new_jobs_to_insert_db = []
         for job in jobs_to_send:
