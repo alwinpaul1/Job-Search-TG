@@ -884,6 +884,11 @@ ADMIN_USER_ID = 7744296624  # Your Telegram user ID
 # --- Text and Link Canonicalization Functions ---
 def canonical_link(url: str) -> str:
     """Extract numeric job ID for consistent deduplication across LinkedIn, Indeed, Glassdoor."""
+    # Lowercase first: LinkedIn %-encodes umlauts with UPPERCASE hex (köln -> k%C3%B6ln),
+    # and the slug pattern's char class is lowercase-only. Without this, slug URLs with
+    # German accents fail extraction and fall through to the full-URL fallback, breaking
+    # dedup. Digits/hex IDs are case-insensitive so this is safe for all existing ids.
+    url = (url or "").lower()
     patterns = [
         (r"/jobs/view/(\d+)", "li"),
         (r"/jobs/view/[a-z0-9%\-]+-(\d{7,})", "li"),
