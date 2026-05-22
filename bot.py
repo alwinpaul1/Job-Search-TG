@@ -5595,13 +5595,12 @@ def _jobquest_scrape_multi_board(keyword, location, filters_dict, results_wanted
     base_kw, job_types = _bot_filters_to_jobquest_kwargs(fdict)
     depth, TIMEOUT = _scrape_plan(keyword, location)
     per_site = min(results_wanted, depth) if results_wanted else depth
-    # LinkedIn paginates by 25; it's fast + the priority, so floor at 8 pages (~200
-    # recent results) and let the adaptive depth push deeper, capped at 16 (~400).
-    li_pages = min(16, max(8, -(-per_site // 25)))
-    # Indeed/Glassdoor are deprioritized (user wants LinkedIn) and JobQuest is slow,
-    # so cap their depth — the fast scrape lets the adaptive ceiling climb high, but
-    # there's no value scraping hundreds of Indeed rows. Keep it modest.
-    ig_per_site = min(per_site, 60)
+    # No hardcoded caps — scrape as much as is available, bounded only by the
+    # adaptive per-alert time budget (per_site already = budget ceiling). LinkedIn
+    # paginates by 25; floor at 8 pages so the priority board always goes deep, then
+    # follow the adaptive depth. Indeed/Glassdoor scrape to the same budget depth.
+    li_pages = max(8, -(-per_site // 25))
+    ig_per_site = per_site
 
     # Reuse the alert's LinkedIn-param filters; inject a time-posted-range from
     # hours_old so the deep guest-API scrape stays on recent postings.
