@@ -5598,6 +5598,10 @@ def _jobquest_scrape_multi_board(keyword, location, filters_dict, results_wanted
     # LinkedIn paginates by 25; it's fast + the priority, so floor at 8 pages (~200
     # recent results) and let the adaptive depth push deeper, capped at 16 (~400).
     li_pages = min(16, max(8, -(-per_site // 25)))
+    # Indeed/Glassdoor are deprioritized (user wants LinkedIn) and JobQuest is slow,
+    # so cap their depth — the fast scrape lets the adaptive ceiling climb high, but
+    # there's no value scraping hundreds of Indeed rows. Keep it modest.
+    ig_per_site = min(per_site, 60)
 
     # Reuse the alert's LinkedIn-param filters; inject a time-posted-range from
     # hours_old so the deep guest-API scrape stays on recent postings.
@@ -5607,9 +5611,9 @@ def _jobquest_scrape_multi_board(keyword, location, filters_dict, results_wanted
         if _tpr:
             li_filters["f_TPR"] = _tpr
 
-    ig_common = dict(search_term=keyword, location=location, results_wanted=per_site,
+    ig_common = dict(search_term=keyword, location=location, results_wanted=ig_per_site,
                      country_indeed="germany", verbose=0, **base_kw)
-    logger.info(f"🔍 [SCRAPE_PARAMS] li_pages={li_pages} ig_per_site={per_site} timeout={TIMEOUT}s "
+    logger.info(f"🔍 [SCRAPE_PARAMS] li_pages={li_pages} ig_per_site={ig_per_site} timeout={TIMEOUT}s "
                 f"hours_old={base_kw.get('hours_old')} job_types={len(job_types)}")
     _scrape_t0 = _time.time()
 
