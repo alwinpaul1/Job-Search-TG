@@ -5575,61 +5575,92 @@ def adapt_scrape_depth(keyword, location, scraped, new_count):
 
 
 def _jobquest_scrape_multi_board(keyword, location, filters_dict, results_wanted=None):
-    """Drop-in replacement for the LinkedIn-only scrape loop.
+    """Multi-board scrape: LinkedIn + Indeed + Glassdoor → bot-shape dicts.
 
-    Multi-board (LinkedIn + Indeed + Glassdoor) with fan-out on multi-select job_types.
-    Returns list of dicts in the bot's expected shape.
-
-    Depth and timeout are fully dynamic via a per-alert feedback loop
-    (_scrape_plan / adapt_scrape_depth): depth grows while a full scrape keeps
-    finding new jobs and shrinks once saturated; timeout tracks measured latency.
-    No hardcoded caps. The scheduler's max_instances=1 skips overlapping runs.
+    LinkedIn uses the fast guest-API scraper (`scrape_linkedin`) — ~3x faster than
+    JobQuest's LinkedIn path (no per-job overhead/stealth delays), so it reaches the
+    depth needed to surface recent jobs buried in LinkedIn's relevance ordering. The
+    guest endpoint is public/unauthenticated (no Cloudflare), and tolerates this. If
+    it ever yields nothing (throttle/HTML change), we fall back to JobQuest LinkedIn,
+    so there's no total-outage risk. Indeed + Glassdoor stay on JobQuest. Both run
+    concurrently. Depth/timeout remain dynamic via the _scrape_plan feedback loop;
+    LinkedIn gets a deeper page floor since it's fast and the user's priority.
     """
     from jobquest import scrape_jobs
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as _Timeout
     import pandas as _pd
     import time as _time
 
-    base_kw, job_types = _bot_filters_to_jobquest_kwargs(filters_dict or {})
+    fdict = filters_dict or {}
+    base_kw, job_types = _bot_filters_to_jobquest_kwargs(fdict)
     depth, TIMEOUT = _scrape_plan(keyword, location)
     per_site = min(results_wanted, depth) if results_wanted else depth
-    common = dict(search_term=keyword, location=location, results_wanted=per_site,
-                  country_indeed="germany", verbose=0, **base_kw)
-    logger.info(f"🔍 [SCRAPE_PARAMS] per_site={per_site} timeout={TIMEOUT}s "
+    # LinkedIn paginates by 25; it's fast + the priority, so floor at 8 pages (~200
+    # recent results) and let the adaptive depth push deeper, capped at 16 (~400).
+    li_pages = min(16, max(8, -(-per_site // 25)))
+
+    # Reuse the alert's LinkedIn-param filters; inject a time-posted-range from
+    # hours_old so the deep guest-API scrape stays on recent postings.
+    li_filters = dict(fdict)
+    if "f_TPR" not in li_filters and base_kw.get("hours_old"):
+        _tpr = {24: "r86400", 168: "r604800", 720: "r2592000"}.get(base_kw["hours_old"])
+        if _tpr:
+            li_filters["f_TPR"] = _tpr
+
+    ig_common = dict(search_term=keyword, location=location, results_wanted=per_site,
+                     country_indeed="germany", verbose=0, **base_kw)
+    logger.info(f"🔍 [SCRAPE_PARAMS] li_pages={li_pages} ig_per_site={per_site} timeout={TIMEOUT}s "
                 f"hours_old={base_kw.get('hours_old')} job_types={len(job_types)}")
     _scrape_t0 = _time.time()
 
-    sites = ["linkedin", "indeed", "glassdoor"]
-    try:
+    def _scrape_linkedin_fast():
+        try:
+            return scrape_linkedin(keyword, location, li_filters, max_pages=li_pages)
+        except Exception as e:
+            logger.warning(f"Fast LinkedIn scrape error: {e}")
+            return None
+
+    def _scrape_indeed_glassdoor():
+        sites = ["indeed", "glassdoor"]
         if not job_types or len(job_types) >= 4:
-            with ThreadPoolExecutor(max_workers=1) as exe:
-                df = exe.submit(scrape_jobs, site_name=sites, **common).result(timeout=TIMEOUT)
-        elif len(job_types) == 1:
-            with ThreadPoolExecutor(max_workers=1) as exe:
-                df = exe.submit(scrape_jobs, site_name=sites, job_type=job_types[0], **common).result(timeout=TIMEOUT)
-        else:
-            def _li():
-                return scrape_jobs(site_name=["linkedin"], **common)
-            def _other(jt):
-                return scrape_jobs(site_name=["indeed", "glassdoor"], job_type=jt, **common)
-            with ThreadPoolExecutor(max_workers=len(job_types) + 1) as exe:
-                futures = [exe.submit(_li)] + [exe.submit(_other, jt) for jt in job_types]
-                dfs = []
-                for f in futures:
-                    try:
-                        dfs.append(f.result(timeout=TIMEOUT))
-                    except _Timeout:
-                        logger.warning(f"JobQuest fan-out branch timed out after {TIMEOUT}s, skipping")
-            df = _pd.concat(dfs).drop_duplicates(subset=["job_url"]).reset_index(drop=True) if dfs else _pd.DataFrame()
-    except _Timeout:
-        logger.warning(f"JobQuest scrape timed out after {TIMEOUT}s for '{keyword}' in '{location}'")
-        _record_scrape_duration(keyword, location, TIMEOUT, per_site)
-        return []
+            return scrape_jobs(site_name=sites, **ig_common)
+        if len(job_types) == 1:
+            return scrape_jobs(site_name=sites, job_type=job_types[0], **ig_common)
+        dfs = []
+        for jt in job_types:
+            try:
+                dfs.append(scrape_jobs(site_name=sites, job_type=jt, **ig_common))
+            except Exception:
+                pass
+        return _pd.concat(dfs).drop_duplicates(subset=["job_url"]).reset_index(drop=True) if dfs else _pd.DataFrame()
+
+    li_jobs, ig_df = None, _pd.DataFrame()
+    try:
+        with ThreadPoolExecutor(max_workers=2) as exe:
+            f_li = exe.submit(_scrape_linkedin_fast)
+            f_ig = exe.submit(_scrape_indeed_glassdoor)
+            try:
+                li_jobs = f_li.result(timeout=TIMEOUT)
+            except _Timeout:
+                logger.warning(f"Fast LinkedIn scrape timed out after {TIMEOUT}s")
+            try:
+                ig_df = f_ig.result(timeout=TIMEOUT)
+            except _Timeout:
+                logger.warning(f"Indeed/Glassdoor scrape timed out after {TIMEOUT}s")
     except Exception as e:
-        logger.error(f"JobQuest scrape failed: {e}", exc_info=True)
-        return []
+        logger.error(f"Multi-board scrape failed: {e}", exc_info=True)
+
+    # Fallback: fast LinkedIn yielded nothing → let JobQuest cover LinkedIn too.
+    if not li_jobs:
+        logger.warning("Fast LinkedIn empty — falling back to JobQuest LinkedIn")
+        try:
+            li_jobs = _jobquest_df_to_bot_jobs(scrape_jobs(site_name=["linkedin"], **ig_common))
+        except Exception as e:
+            logger.error(f"JobQuest LinkedIn fallback failed: {e}")
+            li_jobs = []
+
     _record_scrape_duration(keyword, location, _time.time() - _scrape_t0, per_site)
-    return _jobquest_df_to_bot_jobs(df)
+    return (li_jobs or []) + _jobquest_df_to_bot_jobs(ig_df)
 
 
 def scrape_linkedin_with_adaptive_jobbert(
