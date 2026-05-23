@@ -1935,9 +1935,38 @@ def save_job_callback(update: Update, context: CallbackContext):
             logger.info(f"[SAVE_DEBUG] sent_jobs lookup result: {job_data is not None}")
             
             if not job_data:
-                logger.error(f"[SAVE_DEBUG] Job not found in cache or sent_jobs: alert_id={alert_id}, job_id={job_id}")
-                query.answer("❌ Job not found (may have expired)")
-                return
+                # Final fallback: recover the job straight from the message the user
+                # clicked. The "View Job" button URL is the job link; the text holds
+                # the title + company. This makes Save work for ANY alert button in the
+                # user's chat even when the cache/sent_jobs record is missing (e.g. a
+                # send whose DB write never committed, or an evicted cache row).
+                logger.info("[SAVE_DEBUG] Cache+sent_jobs miss — recovering from message")
+                msg = query.message
+                msg_link = None
+                try:
+                    rows = msg.reply_markup.inline_keyboard if (msg and msg.reply_markup) else []
+                    for row in rows:
+                        for btn in row:
+                            if getattr(btn, "url", None):
+                                msg_link = btn.url
+                                break
+                        if msg_link:
+                            break
+                except Exception:
+                    pass
+                if msg_link:
+                    lines = [l.strip() for l in ((msg.text or msg.caption or "")).split("\n") if l.strip()]
+                    m_title = lines[1] if len(lines) > 1 else "Saved job"
+                    m_company = ""
+                    if len(lines) > 2 and not lines[2].startswith(("Posted:", "From your alert")):
+                        m_company = lines[2].split(" - ")[0].strip()
+                    job_data = {"job_link": msg_link, "job_title": m_title,
+                                "company": m_company, "location": None, "date_posted": None}
+                    logger.info(f"[SAVE_DEBUG] Recovered from message: '{m_title[:40]}' {msg_link[:50]}")
+                else:
+                    logger.error(f"[SAVE_DEBUG] Job not found and no link in message: alert_id={alert_id}, job_id={job_id}")
+                    query.answer("❌ Job not found (may have expired)")
+                    return
 
         # Get alert details
         cursor.execute(
