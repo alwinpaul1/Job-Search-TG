@@ -5605,6 +5605,39 @@ def adapt_scrape_depth(keyword, location, scraped, new_count):
     return st["depth"]
 
 
+# --- Glassdoor Cloudflare circuit breaker ---
+# When the datacenter IP is flagged, Glassdoor 403s on every request and JobQuest
+# burns ~110 stealth-browser launches/hour trying to solve the challenge — all
+# failing. After N consecutive Glassdoor-empty scrapes we OPEN the circuit and skip
+# Glassdoor entirely (scrape Indeed only) for a cooldown, then probe once. It
+# auto-closes the moment Glassdoor returns rows again. LinkedIn/Indeed unaffected.
+_GD_CIRCUIT_THRESHOLD = 3        # consecutive empty Glassdoor scrapes before opening
+_GD_CIRCUIT_COOLDOWN_S = 3600    # skip Glassdoor this long while open (then probe once)
+_gd_circuit = {"fails": 0, "open_until": 0.0}
+
+
+def _gd_circuit_closed():
+    """True if Glassdoor should be scraped now (circuit closed, or cooldown elapsed → probe)."""
+    return time.time() >= _gd_circuit["open_until"]
+
+
+def _gd_circuit_record(glassdoor_rows):
+    """Update the breaker after an attempted Glassdoor scrape (only call when attempted)."""
+    if glassdoor_rows > 0:
+        if _gd_circuit["fails"] or _gd_circuit["open_until"]:
+            logger.info("🟢 [GD_CIRCUIT] Glassdoor recovered — circuit closed")
+        _gd_circuit["fails"] = 0
+        _gd_circuit["open_until"] = 0.0
+    else:
+        _gd_circuit["fails"] += 1
+        if _gd_circuit["fails"] >= _GD_CIRCUIT_THRESHOLD:
+            _gd_circuit["open_until"] = time.time() + _GD_CIRCUIT_COOLDOWN_S
+            logger.warning(
+                f"🔴 [GD_CIRCUIT] Glassdoor blocked ({_gd_circuit['fails']} empty scrapes) — "
+                f"skipping Glassdoor for {_GD_CIRCUIT_COOLDOWN_S // 60} min (Indeed/LinkedIn unaffected)"
+            )
+
+
 def _jobquest_scrape_multi_board(keyword, location, filters_dict, results_wanted=None):
     """Multi-board scrape: LinkedIn + Indeed + Glassdoor → bot-shape dicts.
 
@@ -5654,8 +5687,9 @@ def _jobquest_scrape_multi_board(keyword, location, filters_dict, results_wanted
             logger.warning(f"Fast LinkedIn scrape error: {e}")
             return None
 
+    gd_on = _gd_circuit_closed()
     def _scrape_indeed_glassdoor():
-        sites = ["indeed", "glassdoor"]
+        sites = ["indeed", "glassdoor"] if gd_on else ["indeed"]
         if not job_types or len(job_types) >= 4:
             return scrape_jobs(site_name=sites, **ig_common)
         if len(job_types) == 1:
@@ -5683,6 +5717,15 @@ def _jobquest_scrape_multi_board(keyword, location, filters_dict, results_wanted
                 logger.warning(f"Indeed/Glassdoor scrape timed out after {TIMEOUT}s")
     except Exception as e:
         logger.error(f"Multi-board scrape failed: {e}", exc_info=True)
+
+    # Update the Glassdoor circuit breaker based on what this attempt returned.
+    if gd_on:
+        try:
+            gd_rows = int((ig_df["site"] == "glassdoor").sum()) if (
+                hasattr(ig_df, "columns") and "site" in ig_df.columns) else 0
+        except Exception:
+            gd_rows = 0
+        _gd_circuit_record(gd_rows)
 
     # Fallback: fast LinkedIn yielded nothing → let JobQuest cover LinkedIn too.
     if not li_jobs:
