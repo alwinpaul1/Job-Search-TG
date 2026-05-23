@@ -1990,6 +1990,7 @@ def save_job_callback(update: Update, context: CallbackContext):
                  alert_data["location"] if alert_data else None)
             )
             conn.commit()
+            logger.info(f"[SAVE_DEBUG] ✅ SAVED: '{job_data['job_title'][:40]}' for chat {chat_id}")
             query.answer("✅ Job saved!")
 
             # Update button to show "✅ Saved"
@@ -2016,6 +2017,7 @@ def save_job_callback(update: Update, context: CallbackContext):
 
         except psycopg2.IntegrityError:
             conn.rollback()
+            logger.info(f"[SAVE_DEBUG] already saved (duplicate): alert_id={alert_id}, job_id={job_id}")
             query.answer("ℹ️ Job already saved")
         except Exception as e:
             logger.error(f"Error saving job: {e}")
@@ -6254,7 +6256,7 @@ def setup_alert_threaded(query, context, keywords, location, prefs):
                 (alert_id, chat_id, job_link, job_id, job_title, company,
                  canonical_title, canonical_company, canonical_location, sent_at)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                ON CONFLICT (alert_id, job_id) DO NOTHING
+                ON CONFLICT DO NOTHING
             """, (
                 alert_id, chat_id, job["Link"], job_id, job["Title"],
                 job["Company"], canonical_title, canonical_company,
@@ -7094,7 +7096,7 @@ def update_alert_baseline_threaded(
                      company, canonical_title, canonical_company,
                      canonical_location, sent_at)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                    ON CONFLICT (alert_id, job_id) DO NOTHING
+                    ON CONFLICT DO NOTHING
                 """, job_data)
             conn.commit()
 
@@ -7422,14 +7424,17 @@ def check_single_alert(alert, bot: Bot):
 
             # Dedup paths within 14 days:
             #   1) same job_id (most precise)
-            #   2) same title + exact canonical_company (catches short names like
+            #   2) same job_link (stable — catches re-sends when job_id changes,
+            #      e.g. after a canonical_link rule change; job_link is the sent_jobs PK)
+            #   3) same title + exact canonical_company (catches short names like
             #      KLA, SAP, BMW, IBM that the first-word path filters out)
-            #   3) same title + first word of canonical_company (>= 4 chars) —
+            #   4) same title + first word of canonical_company (>= 4 chars) —
             #      catches "Scalable Capital" / "Scalable GmbH" / "Scalable Press"
             cursor.execute(
                 """SELECT 1 FROM sent_jobs WHERE
                    chat_id = %s AND (
                        job_id = %s OR
+                       job_link = %s OR
                        (canonical_title = %s
                         AND canonical_title != ''
                         AND canonical_company != ''
@@ -7441,7 +7446,7 @@ def check_single_alert(alert, bot: Bot):
                         ))
                    )
                    LIMIT 1""",
-                (alert["chat_id"], job_id, canonical_title, canonical_company, canonical_company)
+                (alert["chat_id"], job_id, job["Link"], canonical_title, canonical_company, canonical_company)
             )
             is_duplicate = cursor.fetchone() is not None
 
@@ -7591,7 +7596,7 @@ def check_single_alert(alert, bot: Bot):
                      company, canonical_title, canonical_company,
                      canonical_location, sent_at)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                    ON CONFLICT (alert_id, job_id) DO NOTHING
+                    ON CONFLICT DO NOTHING
                 """, job_data)
             logger.info(
                 "Sent and recorded %s new job(s) for alert ID %s.",
@@ -8342,7 +8347,6 @@ def main():
             SAVED_JOBS: [
                 CallbackQueryHandler(saved_jobs_navigation, pattern="^saved_jobs_(next|prev)$"),
                 CallbackQueryHandler(unsave_job_callback, pattern="^unsave_job_"),
-                CallbackQueryHandler(save_job_callback, pattern="^save_job_"),
                 CallbackQueryHandler(main_menu, pattern="^main_menu$"),
                 CallbackQueryHandler(start_from_callback, pattern="^start_command$"),
             ],
