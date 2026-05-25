@@ -7537,6 +7537,25 @@ def check_single_alert(alert, bot: Bot):
         except Exception:
             pass
 
+        # Race guard: a user can delete or pause this alert (via My Alerts) while
+        # this cycle is mid-flight. Deleting cascades its sent_jobs away, which empties
+        # the dedup pool — already-sent jobs then look new and get RE-SENT (duplicates),
+        # followed by an FK error on the sent_jobs INSERT (alert_id no longer exists).
+        # Re-verify the alert still exists and is active right before sending; if not,
+        # skip the sends entirely.
+        if jobs_to_send:
+            cursor.execute(
+                "SELECT is_active FROM alerts WHERE id = %s", (alert["id"],)
+            )
+            _alert_row = cursor.fetchone()
+            if _alert_row is None or _alert_row[0] != 1:
+                logger.info(
+                    f"Alert {alert['id']} was deleted/paused mid-check — "
+                    f"skipping {len(jobs_to_send)} send(s) to avoid duplicates."
+                )
+                conn.commit()
+                return
+
         new_jobs_to_insert_db = []
         for job in jobs_to_send:
             title = html.escape(job["Title"])
