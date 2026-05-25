@@ -6893,6 +6893,46 @@ def delete_alert_confirm(update: Update, context: CallbackContext):
     return my_alerts(update, context)
 
 
+def alert_stale_callback_handler(update: Update, context: CallbackContext):
+    """Global fallback for My-Alerts buttons (view/pause/resume/delete) pressed on
+    messages whose ConversationHandler state was lost — e.g. after a bot restart.
+
+    These buttons are otherwise only wired inside the MY_ALERTS conversation state,
+    so a stale press is silently dropped: "Delete"/"Pause" appears to do nothing and
+    the alert stays active. This mirrors the admin stale-callback handler. It is
+    registered in group 0 *after* the main ConversationHandler, so it only runs when
+    the conversation didn't handle the update (first match per group wins) — no
+    double-dispatch. toggle_alert_status sets an absolute is_active value (not a
+    flip) and delete is idempotent, so even a re-press is harmless.
+    """
+    query = update.callback_query
+    data = query.data or ""
+    try:
+        if data.startswith("view_alert_"):
+            return view_alert_details(update, context)
+        if data.startswith(("pause_alert_", "resume_alert_")):
+            return toggle_alert_status(update, context)
+        if data.startswith("delete_alert_start_"):
+            return delete_alert_start(update, context)
+        if data.startswith("delete_alert_confirm_"):
+            return delete_alert_confirm(update, context)
+        if data == "my_alerts":
+            return my_alerts(update, context)
+    except telegram.error.BadRequest as e:
+        # Old message can't be edited — the DB action already applied; just ack.
+        logger.warning(f"Stale alert callback '{data}': {e}")
+        try:
+            query.answer("Done. Send /start → My Alerts to refresh the list.")
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error(f"Stale alert callback '{data}' failed: {e}", exc_info=True)
+        try:
+            query.answer("Something went wrong — send /start to refresh.")
+        except Exception:
+            pass
+
+
 def edit_alert_start(update: Update, context: CallbackContext):
     """Start editing an existing alert's preferences."""
     query = update.callback_query
@@ -8361,6 +8401,16 @@ def main():
         allow_reentry=True,
     )
     dispatcher.add_handler(conv_handler)
+
+    # Global fallback for My-Alerts buttons pressed on messages whose conversation
+    # state was lost after a bot restart. Without this, "Delete"/"Pause" is silently
+    # dropped and the alert stays active (the bug behind "I removed it but still get
+    # jobs"). In group 0 AFTER conv_handler so it only fires when the conversation
+    # didn't handle the update — no double-dispatch. Mirrors the admin stale handler.
+    dispatcher.add_handler(CallbackQueryHandler(
+        alert_stale_callback_handler,
+        pattern=r"^(view_alert_|pause_alert_|resume_alert_|delete_alert_start_|delete_alert_confirm_|my_alerts$)"
+    ))
 
     # Add standalone save/unsave handlers outside ConversationHandler
     # This fixes the issue where callbacks are dropped when user has no active
