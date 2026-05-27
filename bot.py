@@ -7548,7 +7548,8 @@ def check_single_alert(alert, bot: Bot):
                 "SELECT is_active FROM alerts WHERE id = %s", (alert["id"],)
             )
             _alert_row = cursor.fetchone()
-            if _alert_row is None or _alert_row[0] != 1:
+            # get_db_connection uses RealDictCursor → row is a dict
+            if _alert_row is None or _alert_row["is_active"] != 1:
                 logger.info(
                     f"Alert {alert['id']} was deleted/paused mid-check — "
                     f"skipping {len(jobs_to_send)} send(s) to avoid duplicates."
