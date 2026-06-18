@@ -1089,6 +1089,7 @@ def init_db():
                 location TEXT NOT NULL,
                 filters TEXT,
                 is_active INTEGER DEFAULT 1,
+                admin_paused INTEGER DEFAULT 0,
                 last_checked TIMESTAMP DEFAULT NOW()
             )
         """)
@@ -1301,6 +1302,15 @@ def init_db():
         except Exception as e:
             conn.rollback()
             logger.warning(f"user_settings column addition warning: {e}")
+
+        # Add admin_paused marker to alerts for the admin "Pause/Resume All" feature.
+        # Marks rows paused by an admin bulk Pause-All, so Resume-All only re-activates
+        # those (and never a user's own individually-paused alert).
+        try:
+            cursor.execute("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS admin_paused INTEGER DEFAULT 0")
+        except Exception as e:
+            conn.rollback()
+            logger.warning(f"alerts admin_paused column addition warning: {e}")
 
         conn.commit()
         logger.info("PostgreSQL database initialized and schema updated successfully.")
@@ -2451,7 +2461,7 @@ def admin_view_user_alerts(update: Update, context: CallbackContext):
         )
         user_info = cursor.fetchone()
         cursor.execute(
-            "SELECT id, keywords, location, is_active, last_checked FROM alerts WHERE chat_id = %s ORDER BY id",
+            "SELECT id, keywords, location, is_active, last_checked, admin_paused FROM alerts WHERE chat_id = %s ORDER BY id",
             (chat_id,)
         )
         alerts = cursor.fetchall()
@@ -2478,6 +2488,22 @@ def admin_view_user_alerts(update: Update, context: CallbackContext):
         keyboard.append([InlineKeyboardButton(
             f"{status_icon} #{a['id']} {kw} • {loc}",
             callback_data=f"adm_va_{a['id']}"
+        )])
+
+    # Bulk pause/resume all of this user's alerts (smart toggle).
+    # Resume-All only re-activates alerts paused by an admin Pause-All (admin_paused=1),
+    # so a user's own individually-paused alerts are preserved.
+    active_count = sum(1 for a in alerts if a["is_active"])
+    admin_paused_count = sum(1 for a in alerts if a.get("admin_paused"))
+    if admin_paused_count > 0:
+        keyboard.append([InlineKeyboardButton(
+            f"▶️ Resume All ({admin_paused_count})",
+            callback_data=f"adm_resumeall_{chat_id}"
+        )])
+    elif active_count > 0:
+        keyboard.append([InlineKeyboardButton(
+            f"⏸️ Pause All ({active_count})",
+            callback_data=f"adm_pauseall_{chat_id}"
         )])
 
     keyboard.append([InlineKeyboardButton("🗑️ Delete User", callback_data=f"adm_deluserstart_{chat_id}")])
@@ -2627,7 +2653,8 @@ def admin_toggle_alert(update: Update, context: CallbackContext):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("UPDATE alerts SET is_active = %s WHERE id = %s", (new_status, alert_id))
+        # Clear admin_paused: an individual toggle overrides the bulk Pause-All marker.
+        cursor.execute("UPDATE alerts SET is_active = %s, admin_paused = 0 WHERE id = %s", (new_status, alert_id))
         conn.commit()
     finally:
         if conn:
@@ -2637,6 +2664,51 @@ def admin_toggle_alert(update: Update, context: CallbackContext):
     # Re-render alert details
     query.data = f"adm_va_{alert_id}"
     return admin_view_alert_details(update, context)
+
+
+def admin_toggle_user_alerts(update: Update, context: CallbackContext):
+    """Pause or resume ALL of a user's alerts from the admin panel.
+
+    Preserves prior individual pauses: Pause-All only pauses currently-active
+    alerts (marking them admin_paused=1), and Resume-All only re-activates
+    alerts that an admin Pause-All paused — never a user's own paused alert.
+    """
+    query = update.callback_query
+    if update.effective_user.id != ADMIN_USER_ID:
+        return ConversationHandler.END
+
+    # adm_pauseall_{chat_id} or adm_resumeall_{chat_id}
+    parts = query.data.split("_")
+    action = parts[1]  # "pauseall" or "resumeall"
+    chat_id = int(parts[2])
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        if action == "pauseall":
+            cursor.execute(
+                "UPDATE alerts SET is_active = 0, admin_paused = 1 "
+                "WHERE chat_id = %s AND is_active = 1",
+                (chat_id,)
+            )
+        else:  # resumeall
+            cursor.execute(
+                "UPDATE alerts SET is_active = 1, admin_paused = 0 "
+                "WHERE chat_id = %s AND admin_paused = 1",
+                (chat_id,)
+            )
+        affected = cursor.rowcount
+        conn.commit()
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
+
+    verb = "Paused" if action == "pauseall" else "Resumed"
+    query.answer(f"{verb} {affected} alert(s).")
+    # Re-render the user's alert list
+    query.data = f"adm_user_{chat_id}"
+    return admin_view_user_alerts(update, context)
 
 
 
@@ -6836,7 +6908,7 @@ def toggle_alert_status(update: Update, context: CallbackContext):
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE alerts SET is_active = %s WHERE id = %s", (new_status, alert_id)
+            "UPDATE alerts SET is_active = %s, admin_paused = 0 WHERE id = %s", (new_status, alert_id)
         )
         conn.commit()
     finally:
@@ -8457,6 +8529,7 @@ def main():
                 CallbackQueryHandler(admin_view_alert_details, pattern=r"^adm_va_\d+$"),
                 CallbackQueryHandler(admin_delete_user_start, pattern=r"^adm_deluserstart_\d+$"),
                 CallbackQueryHandler(admin_delete_user_confirm, pattern=r"^adm_deluserconf_\d+$"),
+                CallbackQueryHandler(admin_toggle_user_alerts, pattern=r"^adm_(pauseall|resumeall)_\d+$"),
                 CallbackQueryHandler(admin_view_user_alerts, pattern=r"^adm_user_\d+$"),
                 CallbackQueryHandler(admin_user_list, pattern=r"^adm_users$"),
                 CallbackQueryHandler(admin_cancel, pattern=r"^adm_cancel$"),
@@ -8521,6 +8594,8 @@ def main():
             return admin_view_alert_details(update, context)
         elif data.startswith("adm_users") or data.startswith("adm_upage_"):
             return admin_user_list(update, context)
+        elif data.startswith("adm_pauseall_") or data.startswith("adm_resumeall_"):
+            return admin_toggle_user_alerts(update, context)
         elif data.startswith("adm_pause_") or data.startswith("adm_resume_"):
             return admin_toggle_alert(update, context)
         elif data.startswith("adm_editkw_"):
