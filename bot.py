@@ -13,6 +13,25 @@ import psycopg2.pool
 import psycopg2.extras
 from psycopg2 import sql as psql
 
+# --- PTB13/py3.12 vendored-urllib3 shim — MUST run before `import telegram` --
+# PTB v13 prefers its VENDORED urllib3 (telegram/vendor/ptb_urllib3), but the
+# vendored six==1.10 breaks on Python 3.12 (legacy find_module import hooks
+# were removed), so PTB silently fell back to the SYSTEM urllib3 — pinning us
+# to urllib3<2 (the fallback imports urllib3.contrib.appengine, v1-only).
+# Seeding the vendored six names with modern six restores the vendored path
+# and frees the system urllib3 to be v2 (fixes 5 CVEs, 4 high).
+import sys
+import six as _six
+from six.moves import http_client as _six_http_client
+from six.moves.urllib import parse as _six_urllib_parse
+_VENDORED_SIX = "telegram.vendor.ptb_urllib3.urllib3.packages.six"
+sys.modules[_VENDORED_SIX] = _six
+sys.modules[_VENDORED_SIX + ".moves"] = _six.moves
+sys.modules[_VENDORED_SIX + ".moves.http_client"] = _six_http_client
+sys.modules[_VENDORED_SIX + ".moves.urllib"] = _six.moves.urllib
+sys.modules[_VENDORED_SIX + ".moves.urllib.parse"] = _six_urllib_parse
+# -----------------------------------------------------------------------------
+
 import telegram
 from dotenv import load_dotenv
 
