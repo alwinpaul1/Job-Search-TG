@@ -19,7 +19,6 @@ job_alerts.db
 *.service
 
 # Documentation files
-CLAUDE.md
 
 # Backup/alternative bot files
 bot1.py
