@@ -1323,6 +1323,11 @@ def init_db():
                 WHERE s.alert_id = u.alert_id
                 AND substring(s.job_id from '.*-(\d{7,})$') = u.numeric_id
                 AND s.job_id ~ '.*-\d{7,}$' AND length(s.job_id) > 20
+                AND NOT EXISTS (
+                    SELECT 1 FROM sent_jobs t
+                    WHERE t.alert_id = s.alert_id
+                    AND t.job_id = substring(s.job_id from '.*-(\d{7,})$')
+                )
             """)
             backfilled = cursor.rowcount
             if backfilled > 0:
