@@ -13,23 +13,56 @@ import psycopg2.pool
 import psycopg2.extras
 from psycopg2 import sql as psql
 
-# --- PTB13/py3.12 vendored-urllib3 shim — MUST run before `import telegram` --
-# PTB v13 prefers its VENDORED urllib3 (telegram/vendor/ptb_urllib3), but the
-# vendored six==1.10 breaks on Python 3.12 (legacy find_module import hooks
-# were removed), so PTB silently fell back to the SYSTEM urllib3 — pinning us
-# to urllib3<2 (the fallback imports urllib3.contrib.appengine, v1-only).
-# Seeding the vendored six names with modern six restores the vendored path
-# and frees the system urllib3 to be v2 (fixes 5 CVEs, 4 high).
+# --- PTB13/py3.12 compat: private urllib3 1.26 for PTB — before `import telegram`
+# PTB v13's bundled urllib3 (a 2016 vendored copy) cannot run on Python 3.12
+# (ssl.wrap_socket was removed → NameError PROTOCOL_SSLv23 on first connect),
+# and its system-urllib3 fallback hard-requires urllib3<2 (contrib.appengine).
+# So we load the repo-vendored, py3.12-compatible urllib3 1.26.20 from
+# ptb_vendor/ under a private top-level name (a dotted name would import the
+# real `telegram` mid-shim — circular), then alias the loaded tree under PTB's
+# expected vendored prefix in sys.modules (the pattern pip uses for
+# pip._vendor). PTB then talks to api.telegram.org over this private v1 copy,
+# while the system-wide urllib3 stays v2 (CVE-clean) for requests/scrapling/
+# everything else.
+import importlib
+import importlib.util
 import sys
-import six as _six
-from six.moves import http_client as _six_http_client
-from six.moves.urllib import parse as _six_urllib_parse
-_VENDORED_SIX = "telegram.vendor.ptb_urllib3.urllib3.packages.six"
-sys.modules[_VENDORED_SIX] = _six
-sys.modules[_VENDORED_SIX + ".moves"] = _six.moves
-sys.modules[_VENDORED_SIX + ".moves.http_client"] = _six_http_client
-sys.modules[_VENDORED_SIX + ".moves.urllib"] = _six.moves.urllib
-sys.modules[_VENDORED_SIX + ".moves.urllib.parse"] = _six_urllib_parse
+_PTB_VENDOR_U3 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ptb_vendor", "urllib3")
+_U3_COMPAT = "_ptb_urllib3_compat"
+_u3_spec = importlib.util.spec_from_file_location(
+    _U3_COMPAT,
+    os.path.join(_PTB_VENDOR_U3, "__init__.py"),
+    submodule_search_locations=[_PTB_VENDOR_U3],
+)
+_u3_mod = importlib.util.module_from_spec(_u3_spec)
+sys.modules[_U3_COMPAT] = _u3_mod
+_u3_spec.loader.exec_module(_u3_mod)
+# Pre-import everything telegram/utils/request.py pulls from the vendored tree
+for _sub in (
+    "connection", "connectionpool", "fields", "filepost", "poolmanager",
+    "contrib", "contrib.appengine", "util", "util.timeout", "util.retry",
+    "packages", "packages.six", "packages.six.moves",
+    "packages.six.moves.http_client", "packages.six.moves.urllib",
+    "packages.six.moves.urllib.parse",
+):
+    importlib.import_module(f"{_U3_COMPAT}.{_sub}")
+# Alias the whole loaded tree under PTB's expected vendored module prefix
+_U3_PREFIX = "telegram.vendor.ptb_urllib3.urllib3"
+for _name in [n for n in sys.modules if n == _U3_COMPAT or n.startswith(_U3_COMPAT + ".")]:
+    sys.modules[_U3_PREFIX + _name[len(_U3_COMPAT):]] = sys.modules[_name]
+# Seed the intermediate packages too (both are empty files in PTB, verified):
+# with the leaf pre-seeded, the import machinery short-circuits and never
+# imports them, so `import telegram.vendor...urllib3 as u` would fail its
+# attribute walk on the partially-initialized `telegram` package.
+import types
+_dummy_vendor = types.ModuleType("telegram.vendor")
+_dummy_vendor.__path__ = []
+_dummy_ptb = types.ModuleType("telegram.vendor.ptb_urllib3")
+_dummy_ptb.__path__ = []
+_dummy_vendor.ptb_urllib3 = _dummy_ptb
+_dummy_ptb.urllib3 = _u3_mod
+sys.modules["telegram.vendor"] = _dummy_vendor
+sys.modules["telegram.vendor.ptb_urllib3"] = _dummy_ptb
 # -----------------------------------------------------------------------------
 
 import telegram
