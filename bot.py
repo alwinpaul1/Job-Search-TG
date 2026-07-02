@@ -592,19 +592,22 @@ class DatabasePool:
                         self.active_connections -= 1
                     logger.debug("🔄 Discarded stale connection from pool")
             
-            # Create new connection if under limit
+            # Create new connection if under limit. Count AFTER the connect
+            # succeeds: incrementing first leaked counters on every failed
+            # connect (retries tripled the drift and biased the expand path).
             if self.active_connections < self.max_connections:
+                conn = self._create_connection()
                 self.active_connections += 1
                 self.checked_out += 1
-                conn = self._create_connection()
                 return conn
-            
+
             # Pool exhausted - expand dynamically instead of warning
             # This allows the pool to grow beyond max temporarily under load
+            conn = self._create_connection()
             self.active_connections += 1
             self.checked_out += 1
             logger.debug(f"📊 Pool expanded: {self.active_connections} active (max: {self.max_connections})")
-            return self._create_connection()
+            return conn
     
     def return_connection(self, conn):
         """Return a connection to the pool."""
@@ -908,7 +911,9 @@ def canonical_link(url: str) -> str:
         if m:
             return f"{prefix}{m.group(1)}" if prefix in ("in", "gd") else m.group(1)
 
-    base_url = url.lower().split("#")[0].rstrip("/")
+    # Strip query strings too: varying tracking params would otherwise mint a
+    # fresh job_id AND job_link (the PK) for the same job every cycle.
+    base_url = url.lower().split("#")[0].split("?")[0].rstrip("/")
     return base_url
 
 
@@ -2146,9 +2151,11 @@ def unsave_job_callback(update: Update, context: CallbackContext):
         conn = get_db_connection()
         cursor = conn.cursor()
 
+        # chat_id guard: callback data is client-supplied — without it any
+        # user could delete another user's saved job by forging unsave_job_<N>.
         cursor.execute(
-            """DELETE FROM saved_jobs WHERE id = %s""",
-            (saved_job_id,)
+            """DELETE FROM saved_jobs WHERE id = %s AND chat_id = %s""",
+            (saved_job_id, update.effective_chat.id)
         )
         conn.commit()
         query.answer("✅ Job removed from saved jobs")
@@ -2270,12 +2277,14 @@ def admin_stats(update: Update, context: CallbackContext):
 🔍 **Popular Keywords**
 """
 
+        # escape user-entered values: an unbalanced _ * ` [ in any keyword
+        # (e.g. "machine_learning") makes Telegram reject the whole message
         for i, row in enumerate(popular_keywords, 1):
-            stats_msg += f"{i}. {row['keywords']} ({row['count']} alerts)\n"
+            stats_msg += f"{i}. {escape_markdown(row['keywords'])} ({row['count']} alerts)\n"
 
         stats_msg += "\n🌍 **Popular Locations**\n"
         for i, row in enumerate(popular_locations, 1):
-            stats_msg += f"{i}. {row['location']} ({row['count']} alerts)\n"
+            stats_msg += f"{i}. {escape_markdown(row['location'])} ({row['count']} alerts)\n"
 
         # Get database pool stats
         pool_stats = db_pool.get_stats()
@@ -3629,20 +3638,21 @@ def toggle_multi_select_option(
 def parse_date_posted(date_str):
     date_str = date_str.lower().strip()
     now = datetime.now()
+    # "an hour ago" / "yesterday" carry no digit — .group() on None would
+    # crash the sort key and discard the whole scrape. Mirror the `if m else 1`
+    # guard from parse_date_posted_to_datetime.
+    m = re.search(r"\d+", date_str)
+    n = int(m.group()) if m else 1
     if "hour" in date_str:
-        return now - timedelta(hours=int(re.search(r"\d+", date_str).group()))
+        return now - timedelta(hours=n)
     if "day" in date_str:
-        return now - timedelta(days=int(re.search(r"\d+", date_str).group()))
+        return now - timedelta(days=n)
     if "week" in date_str:
-        return now - timedelta(weeks=int(re.search(r"\d+", date_str).group()))
+        return now - timedelta(weeks=n)
     if "month" in date_str:
-        return now - timedelta(
-            days=30 * int(re.search(r"\d+", date_str).group())
-        )
+        return now - timedelta(days=30 * n)
     if "year" in date_str:
-        return now - timedelta(
-            days=365 * int(re.search(r"\d+", date_str).group())
-        )
+        return now - timedelta(days=365 * n)
     return now
 
 
@@ -4289,7 +4299,7 @@ def get_system_resources():
             io_counters = process.io_counters()
             disk_read_mb = io_counters.read_bytes / 1024 / 1024
             disk_write_mb = io_counters.write_bytes / 1024 / 1024
-        except:
+        except Exception:
             disk_read_mb = 0
             disk_write_mb = 0
 
@@ -4298,7 +4308,7 @@ def get_system_resources():
             net_io = psutil.net_io_counters()
             net_sent_mb = net_io.bytes_sent / 1024 / 1024
             net_recv_mb = net_io.bytes_recv / 1024 / 1024
-        except:
+        except Exception:
             net_sent_mb = 0
             net_recv_mb = 0
 
@@ -8572,6 +8582,20 @@ def main():
         pattern=r"^(view_alert_|pause_alert_|resume_alert_|delete_alert_start_|delete_alert_confirm_|my_alerts$)"
     ))
 
+    # Same bug class for saved-jobs buttons: 🗑️/Prev/Next on messages older
+    # than the last restart were silently dropped (conversation state lost,
+    # and unlike save_job_ these had no standalone registration).
+    def saved_jobs_stale_callback_handler(update: Update, context: CallbackContext):
+        data = update.callback_query.data
+        if data.startswith("unsave_job_"):
+            return unsave_job_callback(update, context)
+        return saved_jobs_navigation(update, context)
+
+    dispatcher.add_handler(CallbackQueryHandler(
+        saved_jobs_stale_callback_handler,
+        pattern=r"^(unsave_job_|saved_jobs_(next|prev)$)"
+    ))
+
     # Add standalone save/unsave handlers outside ConversationHandler
     # This fixes the issue where callbacks are dropped when user has no active
     # conversation state (e.g., after bot restart without persistence)
@@ -8666,12 +8690,20 @@ def main():
             return admin_toggle_user_alerts(update, context)
         elif data.startswith("adm_pause_") or data.startswith("adm_resume_"):
             return admin_toggle_alert(update, context)
-        elif data.startswith("adm_editkw_"):
-            return admin_edit_keywords_start(update, context)
-        elif data.startswith("adm_editloc_"):
-            return admin_edit_location_start(update, context)
-        elif data.startswith("adm_editflt_"):
-            return admin_edit_filters_start(update, context)
+        elif (data.startswith("adm_editkw_") or data.startswith("adm_editloc_")
+                or data.startswith("adm_editflt_") or data.startswith("adm_flt_")):
+            # Edit flows need live conversation state (typed input / filter
+            # session) that the restart wiped: routing them would show a prompt
+            # whose reply goes nowhere, and adm_flt_* used to crash the else
+            # branch below. Tell the admin to reopen the panel instead.
+            try:
+                query.message.reply_text(
+                    "⚠️ This admin session expired (bot restarted). "
+                    "Run /admin again to edit."
+                )
+            except Exception:
+                pass
+            return
         elif data.startswith("adm_delstart_"):
             return admin_delete_alert_start(update, context)
         elif data.startswith("adm_delconf_"):
@@ -8683,8 +8715,16 @@ def main():
         elif data == "adm_cancel":
             return admin_cancel(update, context)
         else:
-            # Unknown adm_ callback, open admin panel fresh
-            return admin_command(update, context)
+            # Unknown adm_ callback. Don't call admin_command here — it does
+            # update.message.reply_text and update.message is None on callback
+            # updates (AttributeError). Point the admin at /admin instead.
+            try:
+                query.message.reply_text(
+                    "⚠️ This admin session expired (bot restarted). Run /admin again."
+                )
+            except Exception:
+                pass
+            return
 
     dispatcher.add_handler(
         CallbackQueryHandler(admin_stale_callback_handler, pattern=r"^adm_"),
