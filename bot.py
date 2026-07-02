@@ -4716,12 +4716,12 @@ class AdaptiveJobBERTMatcher:
         logger.info(f"🔍 [DIAG] get_jobbert_model() returned in {time.time() - model_fetch_start:.3f} seconds, model={'loaded' if model else 'None'}")
 
         if not model:
-            logger.error("🚨 [CRITICAL] JobBERT model unavailable - likely due to deadlock!")
-            logger.error(f"🔍 [DIAG] Model is None after lock timeout. AI filtering cannot proceed.")
-            logger.error(f"💡 ACTION REQUIRED: Restart the bot to clear the deadlock and enable AI filtering.")
-            logger.error(f"⚠️ Returning empty results - AI filtering is REQUIRED, not using basic fallback.")
-            # Return empty to signal failure - AI filtering is mandatory
-            return []
+            logger.error("🚨 [CRITICAL] JobBERT model unavailable (lock timeout or load failure)")
+            # Returning [] here looked like a successful "0 relevant jobs" and
+            # silently starved alerts until restart. Every other failure path in
+            # this method falls back to keyword filtering — do the same.
+            logger.warning("⚠️ Falling back to basic keyword filtering for this run")
+            return self._fallback_basic_filter(jobs, query)
 
         job_embeddings = None
         query_embedding = None
@@ -5767,24 +5767,29 @@ def _jobquest_scrape_multi_board(keyword, location, filters_dict, results_wanted
 
     li_jobs, ig_df = None, _pd.DataFrame()
     ig_failed = False
+    # No `with` block: __exit__ calls shutdown(wait=True), which blocks until a
+    # hung scrape thread actually returns — making the .result() timeouts fake
+    # (and holding search_ai_lock hostage). Leak the worker thread instead.
+    exe = ThreadPoolExecutor(max_workers=2)
     try:
-        with ThreadPoolExecutor(max_workers=2) as exe:
-            f_li = exe.submit(_scrape_linkedin_fast)
-            f_ig = exe.submit(_scrape_indeed)
-            try:
-                li_jobs = f_li.result(timeout=TIMEOUT)
-            except _Timeout:
-                logger.warning(f"Fast LinkedIn scrape timed out after {TIMEOUT}s")
-            try:
-                ig_df = f_ig.result(timeout=TIMEOUT)
-            except _Timeout:
-                logger.warning(f"Indeed scrape timed out after {TIMEOUT}s")
-                ig_failed = True
-            except Exception as e:
-                logger.warning(f"Indeed scrape failed: {e}")
-                ig_failed = True
+        f_li = exe.submit(_scrape_linkedin_fast)
+        f_ig = exe.submit(_scrape_indeed)
+        try:
+            li_jobs = f_li.result(timeout=TIMEOUT)
+        except _Timeout:
+            logger.warning(f"Fast LinkedIn scrape timed out after {TIMEOUT}s")
+        try:
+            ig_df = f_ig.result(timeout=TIMEOUT)
+        except _Timeout:
+            logger.warning(f"Indeed scrape timed out after {TIMEOUT}s")
+            ig_failed = True
+        except Exception as e:
+            logger.warning(f"Indeed scrape failed: {e}")
+            ig_failed = True
     except Exception as e:
         logger.error(f"Multi-board scrape failed: {e}", exc_info=True)
+    finally:
+        exe.shutdown(wait=False)
 
     # Fallback: fast LinkedIn yielded nothing → let JobQuest cover LinkedIn too.
     # li_jobs is None means the fast scrape ERRORED (block/network), [] means it
@@ -7669,7 +7674,32 @@ def check_single_alert(alert, bot: Bot):
                 conn.commit()
                 return
 
-        new_jobs_to_insert_db = []
+        # Cache job details BEFORE sending so the 💾 Save button works the
+        # moment each message lands (also computes the callback-safe job id).
+        for job in jobs_to_send:
+            job_id_for_callback = job["_job_id"]
+            if len(job_id_for_callback) > 40:  # Telegram 64-byte callback_data limit
+                job_id_for_callback = hashlib.md5(job_id_for_callback.encode()).hexdigest()[:16]
+            job["_job_id_for_callback"] = job_id_for_callback
+            cursor.execute("""
+                INSERT INTO job_details_cache
+                (alert_id, job_id, job_link, job_title, company, location,
+                 date_posted, cached_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (alert_id, job_id) DO UPDATE SET
+                    job_link = EXCLUDED.job_link,
+                    job_title = EXCLUDED.job_title,
+                    company = EXCLUDED.company,
+                    location = EXCLUDED.location,
+                    date_posted = EXCLUDED.date_posted,
+                    cached_at = NOW()
+            """, (
+                alert["id"], job_id_for_callback, job["Link"], job["Title"],
+                job["Company"], job["Location"], job["Date Posted"]
+            ))
+        conn.commit()
+
+        sent_count = 0
         for job in jobs_to_send:
             title = html.escape(job["Title"])
             company = html.escape(job["Company"]) if job["Company"] else ""
@@ -7697,16 +7727,7 @@ def check_single_alert(alert, bot: Bot):
                 f"From your alert for: <b>{keywords}</b> in "
                 f"<b>{alert_location}</b>"
             )
-            # Create a unique job identifier for this alert
-            # Use hash if job_id is too long for Telegram's 64-byte callback_data limit
-            job_id_for_callback = job['_job_id']
-            if len(job_id_for_callback) > 40:  # Leave room for "save_job_" prefix and alert_id
-                job_id_for_callback = hashlib.md5(job_id_for_callback.encode()).hexdigest()[:16]
-
-            job_unique_id = f"{alert['id']}_{job_id_for_callback}"
-
-            # Store the mapping from hashed ID to original job_id for callback lookup
-            job["_job_id_for_callback"] = job_id_for_callback
+            job_unique_id = f"{alert['id']}_{job['_job_id_for_callback']}"
 
             # Check if job is already saved
             cursor.execute(
@@ -7735,24 +7756,62 @@ def check_single_alert(alert, bot: Bot):
             ]
 
             try:
-                bot.send_message(
-                    chat_id=alert["chat_id"],
-                    text=message,
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode=ParseMode.HTML,
-                )
-
-                # Use pre-computed canonical data
-                new_jobs_to_insert_db.append(
-                    (
-                        alert["id"], alert["chat_id"], job["Link"],
-                        job["_job_id"], job["Title"], job["Company"],
-                        job["_canonical_title"], job["_canonical_company"],
-                        job["_canonical_location"]
+                try:
+                    bot.send_message(
+                        chat_id=alert["chat_id"],
+                        text=message,
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                        parse_mode=ParseMode.HTML,
                     )
-                )
+                except telegram.error.RetryAfter as e:
+                    # Telegram flood control: honor the wait once, then retry.
+                    wait_s = float(getattr(e, "retry_after", 5)) + 1
+                    logger.warning(
+                        "Flood limit for chat %s — waiting %.0fs then retrying",
+                        alert["chat_id"], wait_s
+                    )
+                    time.sleep(wait_s)
+                    bot.send_message(
+                        chat_id=alert["chat_id"],
+                        text=message,
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                        parse_mode=ParseMode.HTML,
+                    )
+
+                # Record + commit IMMEDIATELY after each successful send: a
+                # crash/restart mid-burst must not re-send already-delivered
+                # jobs next cycle (the old batched insert lost all of them).
+                cursor.execute("""
+                    INSERT INTO sent_jobs
+                    (alert_id, chat_id, job_link, job_id, job_title,
+                     company, canonical_title, canonical_company,
+                     canonical_location, sent_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT DO NOTHING
+                """, (
+                    alert["id"], alert["chat_id"], job["Link"],
+                    job["_job_id"], job["Title"], job["Company"],
+                    job["_canonical_title"], job["_canonical_company"],
+                    job["_canonical_location"]
+                ))
+                conn.commit()
+                sent_count += 1
 
                 time.sleep(1.2)
+            except telegram.error.Unauthorized:
+                # User blocked the bot / chat is gone: deactivate their alerts
+                # instead of re-scraping and re-attempting every 30 minutes
+                # forever. They can resume from My Alerts after unblocking.
+                logger.warning(
+                    "Chat %s blocked the bot or is unreachable — "
+                    "deactivating its alerts", alert["chat_id"]
+                )
+                cursor.execute(
+                    "UPDATE alerts SET is_active = 0 WHERE chat_id = %s",
+                    (alert["chat_id"],)
+                )
+                conn.commit()
+                return
             except telegram.error.BadRequest:
                 logger.exception(
                     "Failed to send alert to %s", alert["chat_id"]
@@ -7763,48 +7822,11 @@ def check_single_alert(alert, bot: Bot):
                     alert["chat_id"]
                 )
 
-        if new_jobs_to_insert_db:
-            for job_data in new_jobs_to_insert_db:
-                cursor.execute("""
-                    INSERT INTO sent_jobs
-                    (alert_id, chat_id, job_link, job_id, job_title,
-                     company, canonical_title, canonical_company,
-                     canonical_location, sent_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                    ON CONFLICT DO NOTHING
-                """, job_data)
+        if sent_count:
             logger.info(
                 "Sent and recorded %s new job(s) for alert ID %s.",
-                len(new_jobs_to_insert_db), alert["id"]
+                sent_count, alert["id"]
             )
-
-        # Cache job details for saving later (using callback-safe job_id)
-        # MOVED BEFORE sending messages to fix race condition
-        job_cache_data = []
-        for job in jobs_to_send:
-            job_cache_data.append((
-                alert["id"], job["_job_id_for_callback"], job["Link"], job["Title"],
-                job["Company"], job["Location"], job["Date Posted"]
-            ))
-
-        if job_cache_data:
-            for cache_data in job_cache_data:
-                cursor.execute("""
-                    INSERT INTO job_details_cache
-                    (alert_id, job_id, job_link, job_title, company, location,
-                     date_posted, cached_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
-                    ON CONFLICT (alert_id, job_id) DO UPDATE SET
-                        job_link = EXCLUDED.job_link,
-                        job_title = EXCLUDED.job_title,
-                        company = EXCLUDED.company,
-                        location = EXCLUDED.location,
-                        date_posted = EXCLUDED.date_posted,
-                        cached_at = NOW()
-                """, cache_data)
-        
-        # Commit cache BEFORE sending messages to ensure it's available for save button
-        conn.commit()
 
         cursor.execute(
             "UPDATE alerts SET last_checked = (NOW() AT TIME ZONE 'UTC') WHERE id = %s",
