@@ -1156,6 +1156,11 @@ def init_db():
             )
         """)
 
+        # Persist the CREATE TABLEs before probing: the probe's rollback()
+        # below used to discard the uncommitted tables above, leaving a fresh
+        # DB without user_settings/saved_jobs/job_details_cache for one run.
+        conn.commit()
+
         # --- Safe Table Migration for PostgreSQL ---
         # Check if new columns exist and add them if they don't
         # for backwards compatibility
@@ -1265,43 +1270,43 @@ def init_db():
             backfilled = cursor.rowcount
             if backfilled > 0:
                 logger.info(f"Backfilled {backfilled} job_id entries to numeric IDs")
+            conn.commit()  # own boundary: a later block's rollback must not undo this
         except Exception as e:
             conn.rollback()
             logger.warning(f"Job ID backfill warning (non-critical): {e}")
 
-        # Create indexes for efficient deduplication
-        try:
-            cursor.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_jobid "
-                "ON sent_jobs(alert_id, job_id)"
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_chat_jobid "
-                "ON sent_jobs(chat_id, job_id)"
-            )
-            cursor.execute("DROP INDEX IF EXISTS idx_canonical")
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_canonical "
-                "ON sent_jobs(chat_id, canonical_title, canonical_company, canonical_location)"
-            )
-            # Additional performance indexes for PostgreSQL
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_alerts_active "
-                "ON alerts(is_active) WHERE is_active = 1"
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_alerts_chat_id "
-                "ON alerts(chat_id)"
-            )
-            logger.info("Created deduplication and performance indexes")
-        except Exception as e:
-            conn.rollback()
-            logger.warning(f"Index creation warning: {e}")
+        # Create indexes for efficient deduplication. Each index gets its own
+        # transaction: one failure (e.g. duplicate (alert_id, job_id) pairs
+        # blocking the UNIQUE index) must not skip the remaining indexes on
+        # every startup. The DROP+CREATE pair stays together (schema change).
+        index_groups = [
+            ["CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_jobid "
+             "ON sent_jobs(alert_id, job_id)"],
+            ["CREATE INDEX IF NOT EXISTS idx_chat_jobid "
+             "ON sent_jobs(chat_id, job_id)"],
+            ["DROP INDEX IF EXISTS idx_canonical",
+             "CREATE INDEX IF NOT EXISTS idx_canonical "
+             "ON sent_jobs(chat_id, canonical_title, canonical_company, canonical_location)"],
+            ["CREATE INDEX IF NOT EXISTS idx_alerts_active "
+             "ON alerts(is_active) WHERE is_active = 1"],
+            ["CREATE INDEX IF NOT EXISTS idx_alerts_chat_id "
+             "ON alerts(chat_id)"],
+        ]
+        for stmts in index_groups:
+            try:
+                for stmt in stmts:
+                    cursor.execute(stmt)
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                logger.warning(f"Index creation warning: {e} (stmt: {stmts[-1][:60]})")
+        logger.info("Created deduplication and performance indexes")
 
         # Add user identity columns to user_settings for admin panel display
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS first_name TEXT")
             cursor.execute("ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS username TEXT")
+            conn.commit()
         except Exception as e:
             conn.rollback()
             logger.warning(f"user_settings column addition warning: {e}")
@@ -1311,6 +1316,7 @@ def init_db():
         # those (and never a user's own individually-paused alert).
         try:
             cursor.execute("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS admin_paused INTEGER DEFAULT 0")
+            conn.commit()
         except Exception as e:
             conn.rollback()
             logger.warning(f"alerts admin_paused column addition warning: {e}")
