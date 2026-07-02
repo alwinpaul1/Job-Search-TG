@@ -890,7 +890,10 @@ def canonical_link(url: str) -> str:
     # dedup. Digits/hex IDs are case-insensitive so this is safe for all existing ids.
     url = (url or "").lower()
     patterns = [
-        (r"/jobs/view/(\d+)", "li"),
+        # (?:[/?#]|$) anchor: without it this pattern eats the leading digits of
+        # digit-leading slugs ("/jobs/view/3d-artist-...-4132456789" -> "3"),
+        # colliding job_ids chat-wide and silently suppressing future jobs.
+        (r"/jobs/view/(\d+)(?:[/?#]|$)", "li"),
         (r"/jobs/view/[a-z0-9%\-]+-(\d{7,})", "li"),
         (r"/jobs/(\d+)/", "li"),
         (r"[?&]jk=([a-f0-9]{8,})", "in"),
@@ -4404,6 +4407,11 @@ def unload_jobbert_model():
             except Exception as del_error:
                 logger.error(f"❌ Error deleting model: {del_error}")
                 _global_jobbert_model = None  # Set to None anyway
+
+            # The matcher singleton caches self.model — if we leave that ref,
+            # the ~500MB model survives this unload and no memory is freed.
+            if _global_adaptive_matcher is not None:
+                _global_adaptive_matcher.model = None
             
             try:
                 # Don't acquire memory_cleanup_lock here - we already hold model_lock
@@ -4684,12 +4692,14 @@ class AdaptiveJobBERTMatcher:
 
     def _ensure_model_loaded(self):
         """Ensure model is loaded and available"""
-        if self.model is None:
-            logger.debug("🔄 AdaptiveJobBERTMatcher: Attempting to reload model")
-            self._load_model()
-        # Also check if the global model changed (memory management might have reloaded it)
         global _global_jobbert_model
-        if self.model is not _global_jobbert_model and _global_jobbert_model is not None:
+        # If the global was unloaded, our cached ref is the only thing keeping
+        # ~500MB alive — drop it and reload on demand instead of using it stale.
+        if _global_jobbert_model is None:
+            self.model = None
+            logger.debug("🔄 AdaptiveJobBERTMatcher: Global model unloaded, reloading on demand")
+            self._load_model()
+        elif self.model is not _global_jobbert_model:
             logger.debug("🔄 AdaptiveJobBERTMatcher: Updating model reference to global instance")
             self.model = _global_jobbert_model
         return self.model is not None
@@ -5413,6 +5423,14 @@ def scrape_linkedin(keyword, location, filters_dict, max_pages=None):
             time.sleep(1.5)  # Be respectful to LinkedIn's servers
             response = requests.get(url, headers=headers, timeout=10)
             response.raise_for_status()
+            if response.status_code != 200:
+                # LinkedIn's anti-bot block answers 999, which raise_for_status()
+                # ignores; the block page has no job cards, so it would read as
+                # "no more jobs" and silently starve alerts on a flagged IP.
+                raise requests.exceptions.HTTPError(
+                    f"LinkedIn anti-bot block (status {response.status_code})",
+                    response=response,
+                )
             soup = BeautifulSoup(response.content, "lxml")
             job_cards = soup.find_all("div", class_="base-card")
 
@@ -5452,16 +5470,20 @@ def scrape_linkedin(keyword, location, filters_dict, max_pages=None):
             page_number += 1
 
         except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 400:
+            if e.response is not None and e.response.status_code == 400:
                 logger.info(
                     f"LinkedIn pagination limit reached at start={start_index}"
                     f". Stopping scrape."
                 )
                 break
             logger.error(f"HTTP error for url {url}: {e}")
+            if not all_jobs_data:
+                raise  # nothing collected: surface failure, don't fake "no jobs"
             break
         except requests.exceptions.RequestException as e:
             logger.error(f"Request failed for url {url}: {e}")
+            if not all_jobs_data:
+                raise  # nothing collected: surface failure, don't fake "no jobs"
             break
 
     return sorted(
@@ -5744,6 +5766,7 @@ def _jobquest_scrape_multi_board(keyword, location, filters_dict, results_wanted
         return _pd.concat(dfs).drop_duplicates(subset=["job_url"]).reset_index(drop=True) if dfs else _pd.DataFrame()
 
     li_jobs, ig_df = None, _pd.DataFrame()
+    ig_failed = False
     try:
         with ThreadPoolExecutor(max_workers=2) as exe:
             f_li = exe.submit(_scrape_linkedin_fast)
@@ -5756,17 +5779,34 @@ def _jobquest_scrape_multi_board(keyword, location, filters_dict, results_wanted
                 ig_df = f_ig.result(timeout=TIMEOUT)
             except _Timeout:
                 logger.warning(f"Indeed scrape timed out after {TIMEOUT}s")
+                ig_failed = True
+            except Exception as e:
+                logger.warning(f"Indeed scrape failed: {e}")
+                ig_failed = True
     except Exception as e:
         logger.error(f"Multi-board scrape failed: {e}", exc_info=True)
 
     # Fallback: fast LinkedIn yielded nothing → let JobQuest cover LinkedIn too.
+    # li_jobs is None means the fast scrape ERRORED (block/network), [] means it
+    # genuinely found nothing — only the former counts as a LinkedIn failure.
+    li_failed = False
     if not li_jobs:
         logger.warning("Fast LinkedIn empty — falling back to JobQuest LinkedIn")
         try:
             li_jobs = _jobquest_df_to_bot_jobs(scrape_jobs(site_name=["linkedin"], **ig_common))
         except Exception as e:
             logger.error(f"JobQuest LinkedIn fallback failed: {e}")
+            li_failed = li_jobs is None
             li_jobs = []
+
+    # A blocked IP / total outage must NOT look like "no jobs today": if every
+    # board hard-failed (vs. returned empty), raise so callers treat this cycle
+    # as a failed check — last_checked stays put and the next cycle retries.
+    if li_failed and ig_failed:
+        raise RuntimeError(
+            "Scrape failed on all boards (LinkedIn fast+fallback errored, "
+            "Indeed errored) — not a genuine empty result"
+        )
 
     _record_scrape_duration(keyword, location, _time.time() - _scrape_t0, per_site)
     return (li_jobs or []) + _jobquest_df_to_bot_jobs(ig_df)
@@ -6840,7 +6880,7 @@ def view_alert_details(update: Update, context: CallbackContext):
                 tz_name = user_timezone_str.split('/')[-1].replace('_', ' ')
                 last_checked_display += f" ({tz_name})"
         except (ValueError, pytz.UnknownTimeZoneError):
-            last_checked_display = last_checked_utc_str[:16] + " (UTC)"
+            last_checked_display = str(last_checked_val)[:16] + " (UTC)"
 
     # Use HTML to safely display user-entered keywords and location
     keywords_escaped = html.escape(alert['keywords'])
