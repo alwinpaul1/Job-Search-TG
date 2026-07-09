@@ -8427,7 +8427,17 @@ def main():
         logger.warning(f"User info backfill failed (non-critical): {e}")
 
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        # "Add New Alert" / "Back to Alerts Menu" get pressed on alert messages long
+        # after the conversation moved on (Browse, MAIN_MENU, or no state at all after
+        # a restart). Wired only into the ALERTS_MENU/MY_ALERTS states, such a press
+        # matched no handler, so answerCallbackQuery was never sent and the client spun
+        # "Loading..." forever. As entry points they route from any state, and because
+        # allow_reentry=True the state they return is applied (a plain dispatcher-level
+        # fallback cannot set conversation state — that is why the my_alerts stale
+        # handler re-renders a menu whose Add-New-Alert button is still dead).
+        entry_points=[CommandHandler("start", start),
+                      CallbackQueryHandler(add_alert_start, pattern="^add_alert$"),
+                      CallbackQueryHandler(alerts_menu, pattern="^alerts_menu$")],
         name="main_conversation",
         persistent=True,
         states={
