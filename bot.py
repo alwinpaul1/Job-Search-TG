@@ -168,6 +168,12 @@ diagnostic_file_handler.setFormatter(
 )
 logger.addHandler(diagnostic_file_handler)
 
+# Feature modules (features/): blocklist, German-requirement check, saved-job status.
+from features import alert_settings, companies, keyboards, saved_status, send_filters
+from features import handlers as feature_handlers
+from features import schema as feature_schema
+logging.getLogger("features").addHandler(diagnostic_file_handler)
+
 # Alert monitoring logger
 alert_logger = logging.getLogger("alert_monitor")
 alert_handler = logging.FileHandler("alert_monitor.log")
@@ -1383,6 +1389,15 @@ def init_db():
             conn.rollback()
             logger.warning(f"alerts admin_paused column addition warning: {e}")
 
+        # Feature tables/columns: blocked_companies, alerts.match_language,
+        # saved_jobs.closed_at / status_checked_at.
+        try:
+            feature_schema.apply(cursor)
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            logger.warning(f"Feature schema warning: {e}")
+
         conn.commit()
         logger.info("PostgreSQL database initialized and schema updated successfully.")
     except psycopg2.Error as e:
@@ -1632,6 +1647,7 @@ def make_preferences_menu(
             )
         ],
         [InlineKeyboardButton("🌍 Set Timezone", callback_data="set_timezone")],
+        [InlineKeyboardButton("🚫 Blocked Companies", callback_data="bc_list")],
         [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")],
     ]
     return text, InlineKeyboardMarkup(keyboard)
@@ -1859,15 +1875,20 @@ def saved_jobs_menu(update: Update, context: CallbackContext):
 
         # Get total count
         cursor.execute(
-            "SELECT COUNT(*) FROM saved_jobs WHERE chat_id = %s", (chat_id,)
+            """SELECT COUNT(*) AS count,
+                      COUNT(*) FILTER (WHERE closed_at IS NOT NULL) AS closed
+               FROM saved_jobs WHERE chat_id = %s""",
+            (chat_id,)
         )
-        total_count = cursor.fetchone()["count"]
+        counts = cursor.fetchone()
+        total_count = counts["count"]
+        closed_count = counts["closed"]
 
         # Get saved jobs for current page
         offset = page * JOBS_PER_PAGE
         cursor.execute(
             """SELECT id, job_title, company, location, date_posted, job_link,
-               alert_keywords, alert_location, saved_at
+               alert_keywords, alert_location, saved_at, closed_at
                FROM saved_jobs
                WHERE chat_id = %s
                ORDER BY saved_at DESC
@@ -1913,7 +1934,10 @@ def saved_jobs_menu(update: Update, context: CallbackContext):
         text += f"   🏢 {company}\n"
         text += f"   📍 {location}\n"
         text += f"   📅 Posted: {date_posted}\n"
-        text += f"   💾 Saved: {saved_at[:10] if saved_at else 'N/A'}\n\n"
+        text += f"   💾 Saved: {saved_at[:10] if saved_at else 'N/A'}\n"
+        if job["closed_at"]:
+            text += "   ⛔ <i>No longer accepting applications</i>\n"
+        text += "\n"
 
     # Build keyboard with job links and navigation
     keyboard = []
@@ -1944,6 +1968,13 @@ def saved_jobs_menu(update: Update, context: CallbackContext):
 
     if nav_buttons:
         keyboard.append(nav_buttons)
+
+    if closed_count:
+        keyboard.append([
+            InlineKeyboardButton(
+                f"🧹 Remove {closed_count} closed", callback_data="sj_rmclosed"
+            )
+        ])
 
     keyboard.append([
         InlineKeyboardButton("🔙 Back to Main Menu", callback_data="main_menu")
@@ -2076,23 +2107,16 @@ def save_job_callback(update: Update, context: CallbackContext):
 
             # Update button to show "✅ Saved"
             try:
-                # Get the job_unique_id from callback data
+                # Swap only the Save button so the Block button's state survives.
                 job_unique_id = f"{alert_id}_{job_id}"
-
-                # Update the message's inline keyboard
-                new_keyboard = [
-                    [
-                        InlineKeyboardButton("View Job", url=job_data["job_link"]),
-                        InlineKeyboardButton(
-                            "✅ Saved", callback_data=f"unsave_from_alert_{job_unique_id}"
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton("📋 My Alerts", callback_data="my_alerts"),
-                        InlineKeyboardButton("🏠 Start", callback_data="start_command")
-                    ]
-                ]
-                query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(new_keyboard))
+                new_markup = keyboards.swap_button(
+                    query.message.reply_markup, keyboards.SAVE_PREFIXES,
+                    keyboards.save_button(job_unique_id, saved=True),
+                ) or keyboards.alert_job_keyboard(
+                    job_data["job_link"], job_unique_id, saved=True,
+                    has_company=bool(job_data.get("company")),
+                )
+                query.edit_message_reply_markup(reply_markup=new_markup)
             except Exception as e:
                 logger.error(f"Error updating button after save: {e}")
 
@@ -2168,19 +2192,13 @@ def unsave_from_alert_callback(update: Update, context: CallbackContext):
     if job_link:
         try:
             job_unique_id = f"{alert_id}_{job_id}"
-            new_keyboard = [
-                [
-                    InlineKeyboardButton("View Job", url=job_link),
-                    InlineKeyboardButton(
-                        "💾 Save", callback_data=f"save_job_{job_unique_id}"
-                    )
-                ],
-                [
-                    InlineKeyboardButton("📋 My Alerts", callback_data="my_alerts"),
-                    InlineKeyboardButton("🏠 Start", callback_data="start_command")
-                ]
-            ]
-            query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(new_keyboard))
+            new_markup = keyboards.swap_button(
+                query.message.reply_markup, keyboards.SAVE_PREFIXES,
+                keyboards.save_button(job_unique_id, saved=False),
+            ) or keyboards.alert_job_keyboard(
+                job_link, job_unique_id, saved=False, has_company=False,
+            )
+            query.edit_message_reply_markup(reply_markup=new_markup)
         except Exception as e:
             logger.error(f"Error updating button after unsave: {e}")
 
@@ -3452,6 +3470,7 @@ def admin_delete_user_confirm(update: Update, context: CallbackContext):
         # alerts CASCADE to sent_jobs and job_details_cache
         cursor.execute("DELETE FROM alerts WHERE chat_id = %s", (chat_id,))
         cursor.execute("DELETE FROM user_settings WHERE chat_id = %s", (chat_id,))
+        companies.delete_chat(cursor, chat_id)
         conn.commit()
     finally:
         if conn:
@@ -5659,9 +5678,14 @@ def _jobquest_df_to_bot_jobs(df):
         dp_str = _format_relative_posted(dp)
         if not link or not title:
             continue
+        # Kept for the alert language filter (features/send_filters.py); the
+        # first 3000 chars are plenty to tell English from German.
+        desc = row.get("description")
+        desc_str = str(desc)[:3000] if desc is not None and str(desc) != "nan" else ""
         jobs.append({
             "Title": title, "Company": company,
             "Location": loc_str, "Date Posted": dp_str, "Link": link,
+            "Description": desc_str,
         })
     return jobs
 
@@ -6178,6 +6202,25 @@ def run_scrape_threaded(
                 progress_msg=progress_msg, user_id=user_id,
             )
             logger.info(f"🔍 [DIAG] scrape_linkedin_with_adaptive_jobbert() completed in {time.time() - scrape_start:.3f} seconds, returned {len(sorted_jobs) if sorted_jobs else 0} jobs")
+
+            # Hide the user's blocked companies. Descriptions are dropped: the
+            # job list goes into user_data, which PicklePersistence writes to disk.
+            if sorted_jobs:
+                conn = None
+                try:
+                    conn = get_db_connection()
+                    blocked = companies.blocked_keys(conn.cursor(), user_id)
+                    conn.commit()
+                    sorted_jobs, n_blocked = companies.drop_blocked(sorted_jobs, blocked)
+                    if n_blocked:
+                        logger.info(f"Live search for {user_id}: hid {n_blocked} job(s) from blocked companies")
+                except Exception as e:
+                    logger.warning(f"Blocked-company lookup failed, showing all results: {e}")
+                finally:
+                    if conn:
+                        db_pool.return_connection(conn)
+                for job in sorted_jobs:
+                    job.pop("Description", None)
 
             if not sorted_jobs:
                 safe_progress_update(progress_msg, "Search complete. No jobs found with these criteria.")
@@ -6978,7 +7021,8 @@ def view_alert_details(update: Update, context: CallbackContext):
         f"∙ <b>Date Posted:</b> <code>{date_posted_escaped}</code>\n"
         f"∙ <b>Workplace:</b> <code>{workplace_escaped}</code>\n"
         f"∙ <b>Experience:</b> <code>{experience_escaped}</code>\n"
-        f"∙ <b>Job Types:</b> <code>{job_types_escaped}</code>\n\n"
+        f"∙ <b>Job Types:</b> <code>{job_types_escaped}</code>\n"
+        f"{alert_settings.summary_html(alert)}\n"
         f"🕒 Last checked: {last_checked_display}"
     )
 
@@ -6991,6 +7035,11 @@ def view_alert_details(update: Update, context: CallbackContext):
         [
             InlineKeyboardButton(
                 "⚙️ Edit Preferences", callback_data=f"edit_alert_{alert_id}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🌐 German Language", callback_data=f"ams_{alert_id}"
             )
         ],
         [
@@ -7711,14 +7760,9 @@ def check_single_alert(alert, bot: Bot):
             }
             jobs_to_send.append(job_with_meta)
 
-        logger.info(
-            f"Alert {alert['id']}: {len(found_jobs)} scraped, "
-            f"{duped} duped, {recency_skipped} old, "
-            f"{len(jobs_to_send)} to send"
-        )
-
         # Feedback to the adaptive scrape loop: if a full scrape still yields many
-        # new jobs, deepen next cycle; if saturated by dupes, ease off.
+        # new jobs, deepen next cycle; if saturated by dupes, ease off. Measured
+        # before the per-user filters below, which say nothing about scrape depth.
         try:
             adapt_scrape_depth(
                 alert["keywords"], alert["location"],
@@ -7726,6 +7770,24 @@ def check_single_alert(alert, bot: Bot):
             )
         except Exception:
             pass
+
+        # Per-user filters: blocked companies, then for "I don't speak German"
+        # alerts a Jev check per job (may fetch LinkedIn postings, which also
+        # drops closed jobs).
+        jobs_to_send, fstats = send_filters.apply(
+            jobs_to_send,
+            blocked=companies.blocked_keys(cursor, alert["chat_id"]),
+            no_german=alert_settings.skips_german_jobs(alert),
+        )
+
+        logger.info(
+            f"Alert {alert['id']}: {len(found_jobs)} scraped, "
+            f"{duped} duped, {recency_skipped} old, "
+            f"{fstats['blocked']} blocked co., {fstats['needs_german']} need German "
+            f"({fstats['fallback']} by fallback), "
+            f"{fstats['closed']} closed, {fstats['deferred']} deferred, "
+            f"{len(jobs_to_send)} to send"
+        )
 
         # Race guard: a user can delete or pause this alert (via My Alerts) while
         # this cycle is mid-flight. Deleting cascades its sent_jobs away, which empties
@@ -7809,31 +7871,17 @@ def check_single_alert(alert, bot: Bot):
             )
             is_saved = cursor.fetchone() is not None
 
-            # Show "✅ Saved" if already saved, otherwise "💾 Save"
-            save_button_text = "✅ Saved" if is_saved else "💾 Save"
-            save_callback_data = f"unsave_from_alert_{job_unique_id}" if is_saved else f"save_job_{job_unique_id}"
-
-            keyboard = [
-                [
-                    InlineKeyboardButton("View Job", url=job["Link"]),
-                    InlineKeyboardButton(
-                        save_button_text, callback_data=save_callback_data
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "📋 My Alerts", callback_data="my_alerts"
-                    ),
-                    InlineKeyboardButton("🏠 Start", callback_data="start_command")
-                ]
-            ]
+            reply_markup = keyboards.alert_job_keyboard(
+                job["Link"], job_unique_id, saved=is_saved,
+                has_company=bool(job["Company"]),
+            )
 
             try:
                 try:
                     bot.send_message(
                         chat_id=alert["chat_id"],
                         text=message,
-                        reply_markup=InlineKeyboardMarkup(keyboard),
+                        reply_markup=reply_markup,
                         parse_mode=ParseMode.HTML,
                     )
                 except telegram.error.RetryAfter as e:
@@ -7847,7 +7895,7 @@ def check_single_alert(alert, bot: Bot):
                     bot.send_message(
                         chat_id=alert["chat_id"],
                         text=message,
-                        reply_markup=InlineKeyboardMarkup(keyboard),
+                        reply_markup=reply_markup,
                         parse_mode=ParseMode.HTML,
                     )
 
@@ -8376,7 +8424,18 @@ def main():
             max_instances=1,
             id="scheduler_watchdog"
         )
-        
+
+        # Mark saved LinkedIn jobs that closed (each re-checked at most daily)
+        scheduler.add_job(
+            saved_status.sweep,
+            "interval",
+            hours=3,
+            args=[get_db_connection, db_pool.return_connection],
+            max_instances=1,
+            id="saved_job_status",
+            next_run_time=datetime.now(pytz.UTC) + timedelta(minutes=10),
+        )
+
         scheduler.start()
         logger.info("🚀 Background scheduler started:")
         logger.info("   - Alert checks every 30 minutes (memory-aware)")
@@ -8658,6 +8717,17 @@ def main():
     # conversation state (e.g., after bot restart without persistence)
     dispatcher.add_handler(CallbackQueryHandler(save_job_callback, pattern="^save_job_"), group=1)
     dispatcher.add_handler(CallbackQueryHandler(unsave_from_alert_callback, pattern="^unsave_from_alert_"), group=1)
+
+    # Blocked companies, per-alert German setting, closed saved jobs
+    # (features/handlers.py). Own group; their bc_/ams_/sj_ prefixes match nothing else.
+    feature_handlers.register(
+        dispatcher,
+        get_conn=get_db_connection,
+        return_conn=db_pool.return_connection,
+        preferences_menu=preferences_menu,
+        saved_jobs_menu=saved_jobs_menu,
+        group=3,
+    )
 
     # Add admin command handlers
     dispatcher.add_handler(CommandHandler("stats", admin_stats))

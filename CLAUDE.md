@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-JobQuestTG — a Telegram bot for LinkedIn + Indeed job searching with AI-powered relevance matching and automated alerts. Single-file monolith (`bot.py`, ~8,800 lines) running on an Ubuntu VPS at 217.154.173.148. Sync python-telegram-bot v13 (no asyncio) — heavy work runs in a global 8-worker `ThreadPoolExecutor`.
+JobQuestTG — a Telegram bot for LinkedIn + Indeed job searching with AI-powered relevance matching and automated alerts. Mostly one file (`bot.py`, ~8,900 lines) plus the `features/` package for newer features. Runs on an Ubuntu VPS at 217.154.173.148. Sync python-telegram-bot v13 (no asyncio) — heavy work runs in a global 8-worker `ThreadPoolExecutor`.
 
 Public bot: [@JobQuestTG_Bot](https://t.me/JobQuestTG_Bot)
 
@@ -34,7 +34,24 @@ single clean instance.
 
 ## Architecture
 
-Everything lives in `bot.py`. Key sections in order:
+New features go in `features/` as helper modules that bot.py imports and calls. They never import bot.py (it runs as `__main__`; importing it would re-run the whole module), so DB access and bot.py handlers are passed in as arguments.
+
+| Module | What it does | Called from |
+|--------|--------------|-------------|
+| `companies` | Per-chat company blocklist, `company_key()` normalization (drops accents and legal suffixes, exact match only) | checker, live search, handlers, admin delete-user |
+| `language` | English/German detection by function-word counts; returns None when unsure | `send_filters` |
+| `german_requirement` | Asks TypeSafe's Jev (pinned `jev-1.14.0`, HTTP, ~1,500 input tokens/job) whether a job needs German: required / optional / not_stated. Needs `TYPESAFE_API_KEY` in `.env`; without it falls back to ad language. Policy: not_stated + German-written ad = needs German | `send_filters` |
+| `job_postings` | LinkedIn guest `jobPosting/<id>` fetch → open/closed + description; shared 1.5 s rate limit, 6 h cache | `send_filters`, `saved_status` |
+| `alert_settings` | `alerts.match_language` column: `any` or `nogerman` ("I don't speak German") | checker, alert details |
+| `send_filters` | Pre-send step in the checker: blocklist, then for `nogerman` alerts the Jev check (fetches ≤25 LinkedIn postings per alert per cycle for descriptions, defers the rest, drops closed ones) | `check_single_alert` |
+| `saved_status` | 3-hourly sweep setting `saved_jobs.closed_at`; "Remove closed" button | scheduler, Saved Jobs |
+| `keyboards` | Alert job message keyboard; Save and Block swap one button each so neither wipes the other | checker, save/unsave callbacks |
+| `handlers` | Callbacks `bc_*`, `ams_*`, `sj_rmclosed` in dispatcher group 3 | `main()` |
+| `schema` | Idempotent DDL for the above, run from `init_db()` | `init_db()` |
+
+The German setting lives in its own `alerts` column, NOT in the `filters` JSON: the edit-alert and admin filter flows rewrite `filters` wholesale.
+
+Key sections of `bot.py` in order:
 
 | Lines (approx) | Section |
 |----------------|---------|
@@ -61,7 +78,7 @@ Everything lives in `bot.py`. Key sections in order:
 
 PostgreSQL (`job_alerts` database, user `jobbot`). Config via `DATABASE_URL` env var or individual `POSTGRES_*` vars in `.env`.
 
-**Tables:** `alerts`, `sent_jobs`, `user_settings`, `saved_jobs`, `job_details_cache`
+**Tables:** `alerts`, `sent_jobs`, `user_settings`, `saved_jobs`, `job_details_cache`, `blocked_companies` (from `features/companies.py`)
 
 **`user_settings`** also stores `first_name` and `username` (updated on every `/start`) for admin panel display. Existing users are backfilled from the Telegram API on startup.
 
@@ -122,6 +139,7 @@ Entry point: `/admin` (restricted to `ADMIN_USER_ID`, hardcoded at ~line 884). U
 | `cleanup_stuck_operations` | 5 min | Clear timed-out user operations |
 | `heartbeat_check` | 2 min | Log health status |
 | `scheduler_watchdog` | 10 min | Detect hung scheduler |
+| `saved_job_status` | 3 h | `features/saved_status.sweep`: mark closed saved LinkedIn jobs |
 
 ## Dependency Security Setup (do not "simplify" away)
 
