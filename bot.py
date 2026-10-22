@@ -1001,7 +1001,7 @@ warnings.filterwarnings(
 )
 
 # Admin configuration
-ADMIN_USER_ID = 7744296624  # Your Telegram user ID
+ADMIN_USER_IDS = {7744296624, 510465154}  # Alwin + Aravind
 
 
 # --- Text and Link Canonicalization Functions ---
@@ -2328,7 +2328,7 @@ def admin_stats(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
 
     # Check if user is admin
-    if user_id != ADMIN_USER_ID:
+    if user_id not in ADMIN_USER_IDS:
         update.message.reply_text("⛔ This command is only available to the bot administrator.")
         return
 
@@ -2473,7 +2473,7 @@ def _format_user_label(first_name, username, chat_id):
 
 def admin_command(update: Update, context: CallbackContext):
     """Entry point for /admin — show paginated user list."""
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         update.message.reply_text("⛔ This command is only available to the bot administrator.")
         return ConversationHandler.END
 
@@ -2529,7 +2529,7 @@ def admin_command(update: Update, context: CallbackContext):
 def admin_user_list(update: Update, context: CallbackContext):
     """Callback handler for adm_users and adm_upage_{offset}."""
     query = update.callback_query
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         return ConversationHandler.END
     safe_answer_callback_query(query)
 
@@ -2598,7 +2598,7 @@ def admin_user_list(update: Update, context: CallbackContext):
 def admin_view_user_alerts(update: Update, context: CallbackContext):
     """Show all alerts for a specific user."""
     query = update.callback_query
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         return ConversationHandler.END
     safe_answer_callback_query(query)
 
@@ -2680,7 +2680,7 @@ def admin_view_user_alerts(update: Update, context: CallbackContext):
 def admin_view_alert_details(update: Update, context: CallbackContext):
     """Show full details of an alert with action buttons."""
     query = update.callback_query
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         return ConversationHandler.END
     safe_answer_callback_query(query)
 
@@ -2795,7 +2795,7 @@ def admin_view_alert_details(update: Update, context: CallbackContext):
 def admin_toggle_alert(update: Update, context: CallbackContext):
     """Pause or resume an alert from admin panel."""
     query = update.callback_query
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         return ConversationHandler.END
 
     # adm_pause_{id} or adm_resume_{id}
@@ -2829,7 +2829,7 @@ def admin_toggle_user_alerts(update: Update, context: CallbackContext):
     alerts that an admin Pause-All paused — never a user's own paused alert.
     """
     query = update.callback_query
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         return ConversationHandler.END
 
     # adm_pauseall_{chat_id} or adm_resumeall_{chat_id}
@@ -2870,7 +2870,7 @@ def admin_toggle_user_alerts(update: Update, context: CallbackContext):
 def admin_edit_keywords_start(update: Update, context: CallbackContext):
     """Prompt admin to enter new keywords for an alert."""
     query = update.callback_query
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         return ConversationHandler.END
     safe_answer_callback_query(query)
 
@@ -2906,7 +2906,7 @@ def admin_edit_keywords_start(update: Update, context: CallbackContext):
 
 def admin_edit_keywords_receive(update: Update, context: CallbackContext):
     """Receive new keywords from admin and update the alert."""
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         return ConversationHandler.END
 
     alert_id = context.user_data.get("admin_edit_alert_id")
@@ -2951,7 +2951,7 @@ def admin_edit_keywords_receive(update: Update, context: CallbackContext):
 def admin_edit_location_start(update: Update, context: CallbackContext):
     """Prompt admin to enter new location for an alert."""
     query = update.callback_query
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         return ConversationHandler.END
     safe_answer_callback_query(query)
 
@@ -2987,7 +2987,7 @@ def admin_edit_location_start(update: Update, context: CallbackContext):
 
 def admin_edit_location_receive(update: Update, context: CallbackContext):
     """Receive new location from admin and update the alert."""
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         return ConversationHandler.END
 
     alert_id = context.user_data.get("admin_edit_alert_id")
@@ -3032,7 +3032,7 @@ def admin_edit_location_receive(update: Update, context: CallbackContext):
 def admin_edit_filters_start(update: Update, context: CallbackContext):
     """Show filter category menu for admin filter editing."""
     query = update.callback_query
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         return ConversationHandler.END
     safe_answer_callback_query(query)
 
@@ -3097,7 +3097,7 @@ def _show_admin_filter_menu(query, alert_id, filters):
 def admin_filter_show_date_posted(update: Update, context: CallbackContext):
     """Show Date Posted options (single-select)."""
     query = update.callback_query
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         return ConversationHandler.END
     safe_answer_callback_query(query)
 
@@ -3119,7 +3119,7 @@ def admin_filter_show_date_posted(update: Update, context: CallbackContext):
 def admin_filter_date_posted_selected(update: Update, context: CallbackContext):
     """Handle Date Posted option selection."""
     query = update.callback_query
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         return ConversationHandler.END
     safe_answer_callback_query(query)
 
@@ -3142,7 +3142,7 @@ def admin_filter_date_posted_selected(update: Update, context: CallbackContext):
 def admin_filter_show_workplace(update: Update, context: CallbackContext):
     """Show Workplace options (multi-select)."""
     query = update.callback_query
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         return ConversationHandler.END
     safe_answer_callback_query(query)
 
@@ -3163,7 +3163,7 @@ def admin_filter_show_workplace(update: Update, context: CallbackContext):
 def admin_filter_workplace_selected(update: Update, context: CallbackContext):
     """Handle Workplace option toggle."""
     query = update.callback_query
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         return ConversationHandler.END
     safe_answer_callback_query(query)
 
@@ -3185,7 +3185,7 @@ def admin_filter_workplace_selected(update: Update, context: CallbackContext):
 def admin_filter_show_experience(update: Update, context: CallbackContext):
     """Show Experience options (multi-select)."""
     query = update.callback_query
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         return ConversationHandler.END
     safe_answer_callback_query(query)
 
@@ -3206,7 +3206,7 @@ def admin_filter_show_experience(update: Update, context: CallbackContext):
 def admin_filter_experience_selected(update: Update, context: CallbackContext):
     """Handle Experience option toggle."""
     query = update.callback_query
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         return ConversationHandler.END
     safe_answer_callback_query(query)
 
@@ -3228,7 +3228,7 @@ def admin_filter_experience_selected(update: Update, context: CallbackContext):
 def admin_filter_show_job_types(update: Update, context: CallbackContext):
     """Show Job Types options (multi-select)."""
     query = update.callback_query
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         return ConversationHandler.END
     safe_answer_callback_query(query)
 
@@ -3249,7 +3249,7 @@ def admin_filter_show_job_types(update: Update, context: CallbackContext):
 def admin_filter_job_types_selected(update: Update, context: CallbackContext):
     """Handle Job Types option toggle."""
     query = update.callback_query
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         return ConversationHandler.END
     safe_answer_callback_query(query)
 
@@ -3271,7 +3271,7 @@ def admin_filter_job_types_selected(update: Update, context: CallbackContext):
 def admin_filter_done(update: Update, context: CallbackContext):
     """Save filters to DB and return to filter category menu."""
     query = update.callback_query
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         return ConversationHandler.END
     safe_answer_callback_query(query)
 
@@ -3399,7 +3399,7 @@ def _send_admin_alert_details(message, alert_id, context):
 def admin_delete_alert_start(update: Update, context: CallbackContext):
     """Show delete confirmation for an alert."""
     query = update.callback_query
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         return ConversationHandler.END
     safe_answer_callback_query(query)
 
@@ -3426,7 +3426,7 @@ def admin_delete_alert_start(update: Update, context: CallbackContext):
 def admin_delete_alert_confirm(update: Update, context: CallbackContext):
     """Delete the alert and navigate back to user's alerts."""
     query = update.callback_query
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         return ConversationHandler.END
 
     alert_id = int(query.data.split("_")[-1])
@@ -3459,7 +3459,7 @@ def admin_delete_alert_confirm(update: Update, context: CallbackContext):
 def admin_delete_user_start(update: Update, context: CallbackContext):
     """Show delete confirmation for a user and all their data."""
     query = update.callback_query
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         return ConversationHandler.END
     safe_answer_callback_query(query)
 
@@ -3518,7 +3518,7 @@ def admin_delete_user_start(update: Update, context: CallbackContext):
 def admin_delete_user_confirm(update: Update, context: CallbackContext):
     """Delete user and all their data, navigate back to user list."""
     query = update.callback_query
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         return ConversationHandler.END
 
     chat_id = int(query.data.split("_")[-1])
@@ -3547,7 +3547,7 @@ def admin_delete_user_confirm(update: Update, context: CallbackContext):
 def admin_cancel(update: Update, context: CallbackContext):
     """Close the admin panel via callback."""
     query = update.callback_query
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         return ConversationHandler.END
     safe_answer_callback_query(query)
     try:
@@ -3559,7 +3559,7 @@ def admin_cancel(update: Update, context: CallbackContext):
 
 def admin_cancel_command(update: Update, context: CallbackContext):
     """Close the admin panel via /cancel command."""
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         return ConversationHandler.END
     update.message.reply_text("👑 Admin panel closed.")
     return ConversationHandler.END
@@ -8895,7 +8895,7 @@ def main():
     def admin_stale_callback_handler(update: Update, context: CallbackContext):
         """Re-route stale admin callbacks when conversation state is lost."""
         query = update.callback_query
-        if update.effective_user.id != ADMIN_USER_ID:
+        if update.effective_user.id not in ADMIN_USER_IDS:
             return
         safe_answer_callback_query(query)
         data = query.data
