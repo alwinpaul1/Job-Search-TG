@@ -58,7 +58,7 @@ Key sections of `bot.py` in order:
 | 1–130 | Config, constants, env loading, global thread pool |
 | 130–470 | Infrastructure classes: `DeadlockDetectableLock`, `CrashMonitor`, `CPUTracker` |
 | 470–730 | `DatabasePool` — hand-rolled LIFO pool (adaptive sizing `10 + 0.7 × active_alerts`, clamp 10–50) |
-| 885–950 | **Canonicalization functions** (`canonical_link`, `canonical_text`) — central to dedup. `ADMIN_USER_ID` is hardcoded just above (~884), NOT env-read |
+| 885–950 | **Canonicalization functions** (`canonical_link`, `canonical_text`) — central to dedup. `ADMIN_USER_IDS` (a set: Alwin + Aravind) is hardcoded just above (~1004), NOT env-read |
 | 950–1075 | Date parsing, `escape_markdown`, utilities |
 | 1075–1350 | `init_db()` — schema creation, migrations, index creation (each block commits its own transaction) |
 | 1674–1760 | User info tracking (`upsert_user_info`, `backfill_user_info`) |
@@ -103,7 +103,7 @@ The 14-day window on paths 3–4 is the compromise between blocking cross-board 
 
 ## Admin Panel
 
-Entry point: `/admin` (restricted to `ADMIN_USER_ID`, hardcoded at ~line 884). Uses a `ConversationHandler` with six states:
+Entry point: `/admin` (restricted to the `ADMIN_USER_IDS` set, hardcoded at ~line 1004). Uses a `ConversationHandler` with six states:
 
 | State | Purpose |
 |-------|---------|
