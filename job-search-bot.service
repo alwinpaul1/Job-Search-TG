@@ -31,6 +31,9 @@ SyslogIdentifier=job-search-bot
 
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
+# Cap glibc malloc arenas -- freed memory was retained across 33 per-thread
+# arenas (RSS ratchet -> self-restart every ~2h); see malloc_trim() in bot.py.
+Environment=MALLOC_ARENA_MAX=2
 Environment=HOME=/root
 
 TimeoutStartSec=60

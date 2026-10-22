@@ -181,6 +181,67 @@ alert_handler.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
 alert_logger.addHandler(alert_handler)
 alert_logger.setLevel(logging.INFO)
 
+# --- Memory profiling (opt-in: JQ_MEMPROF=1) ---------------------------------
+# RSS climbs ~10MB per alert check until the 2500MB guard self-restarts the bot.
+# Isolated probes cleared every object-level suspect (Indeed, LinkedIn, the model
+# load/unload cycle, repeated encodes, glibc arenas), and one production recovery
+# freed exactly 0MB via gc -- the signature of native memory. So log RSS next to
+# Python-traced memory: traced flat while RSS climbs means the leak is in a C
+# extension (lxml/psycopg2/torch), not in Python objects.
+MEMPROF = os.getenv("JQ_MEMPROF") == "1"
+_memprof_baseline = None
+if MEMPROF:
+    import tracemalloc
+    tracemalloc.start(3)
+
+
+def log_memprof(rss_mb: float):
+    """Log RSS vs Python-traced memory and the top-growing allocation sites."""
+    global _memprof_baseline
+    if not MEMPROF:
+        return
+    try:
+        traced, peak = tracemalloc.get_traced_memory()
+        logger.critical(
+            f"[MEMPROF] rss={rss_mb:.1f}MB python_traced={traced / 1048576:.1f}MB "
+            f"python_peak={peak / 1048576:.1f}MB"
+        )
+        try:
+            import ctypes
+            import re as _re
+            _libc = ctypes.CDLL("libc.so.6")
+            _buf = ctypes.c_char_p()
+            _sz = ctypes.c_size_t()
+            _libc.open_memstream.restype = ctypes.c_void_p
+            _stream = _libc.open_memstream(ctypes.byref(_buf), ctypes.byref(_sz))
+            if _stream:
+                _libc.malloc_info(0, ctypes.c_void_p(_stream))
+                _libc.fclose(ctypes.c_void_p(_stream))
+                _xml = ctypes.string_at(_buf, _sz.value).decode()
+                _libc.free(_buf)
+                _arenas = _xml.count("<heap nr=")
+                _tot = _re.findall(r'<total type="system" size="(\d+)"/>', _xml)
+                _held = int(_tot[-1]) / 1048576 if _tot else -1.0
+                _rss0 = get_memory_usage()
+                _libc.malloc_trim(0)
+                _rss1 = get_memory_usage()
+                logger.critical(
+                    "[MEMPROF] glibc heaps=%d held=%.1fMB rss_before_trim=%.1fMB "
+                    "rss_after_trim=%.1fMB trim_freed=%.1fMB"
+                    % (_arenas, _held, _rss0, _rss1, _rss0 - _rss1)
+                )
+        except Exception as _e:
+            logger.warning("[MEMPROF] malloc_info failed: %s" % _e)
+        snapshot = tracemalloc.take_snapshot()
+        if _memprof_baseline is None:
+            _memprof_baseline = snapshot
+            return
+        for stat in snapshot.compare_to(_memprof_baseline, "lineno")[:10]:
+            logger.critical(f"[MEMPROF] {stat}")
+    except Exception as e:
+        logger.warning(f"[MEMPROF] snapshot failed: {e}")
+
+
 # Global thread pool for concurrent operations with proper cleanup
 executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="JobQuest")
 
@@ -465,6 +526,7 @@ def emergency_memory_recovery():
         for i in range(5):
             gc.collect()
             time.sleep(0.5)
+        malloc_trim()
         
         # Step 4: Check memory after recovery
         try:
@@ -4445,6 +4507,24 @@ def check_memory_health():
     }
 
 
+def malloc_trim():
+    """Return glibc-retained free memory to the OS.
+
+    gc.collect() frees Python objects but the underlying C memory lands in
+    glibc's per-thread arena free lists (33 heaps in production), which never
+    give it back -- RSS ratcheted ~10MB per alert check up to the 2500MB guard
+    and forced a self-restart every ~2h. Measured in-process 2026-07-09:
+    malloc_trim(0) released 414MB (RSS 1725->1311MB) while Python-traced
+    memory was flat, so allocator retention, not bot code or a C-extension
+    leak, was the growth.
+    """
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception as e:
+        logger.warning(f"malloc_trim unavailable: {e}")
+
+
 def force_memory_cleanup():
     """Aggressive memory cleanup"""
     import gc
@@ -4462,6 +4542,7 @@ def force_memory_cleanup():
     for _ in range(3):
         gc.collect()
     
+    malloc_trim()
     logger.info(f"🧹 Memory cleanup completed. Current usage: {get_memory_usage():.1f} MB")
 
 
@@ -8201,6 +8282,7 @@ def main():
             with memory_cleanup_lock:
                 current_memory = get_memory_usage()
                 logger.info(f"🧹 Periodic cleanup. Memory: {current_memory:.1f} MB")
+                log_memprof(current_memory)
                 
                 # Check for critical memory levels
                 if current_memory > MAX_MEMORY_MB * 0.95:
@@ -8486,7 +8568,17 @@ def main():
         logger.warning(f"User info backfill failed (non-critical): {e}")
 
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        # "Add New Alert" / "Back to Alerts Menu" get pressed on alert messages long
+        # after the conversation moved on (Browse, MAIN_MENU, or no state at all after
+        # a restart). Wired only into the ALERTS_MENU/MY_ALERTS states, such a press
+        # matched no handler, so answerCallbackQuery was never sent and the client spun
+        # "Loading..." forever. As entry points they route from any state, and because
+        # allow_reentry=True the state they return is applied (a plain dispatcher-level
+        # fallback cannot set conversation state — that is why the my_alerts stale
+        # handler re-renders a menu whose Add-New-Alert button is still dead).
+        entry_points=[CommandHandler("start", start),
+                      CallbackQueryHandler(add_alert_start, pattern="^add_alert$"),
+                      CallbackQueryHandler(alerts_menu, pattern="^alerts_menu$")],
         name="main_conversation",
         persistent=True,
         states={
