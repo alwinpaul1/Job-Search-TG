@@ -143,7 +143,7 @@ The text is Telegram HTML and goes out exactly as written. At most one update pe
 
 How to write the text:
 - Write it with the `unslop` skill. No hype, no filler.
-- Format it (Alwin, 2026-10-23): a bold title, then one block per change with a bold heading and a short line under it, a blank line between blocks. Escape `&`, `<`, `>` as `&amp;` `&lt;` `&gt;`. Shape:
+- Format it (Alwin, 2026-10-23): a bold title, then one block per change with a bold heading and a short line under it, two empty lines between blocks (the script enforces this: any blank-line gap in the file becomes exactly two). Escape `&`, `<`, `>` as `&amp;` `&lt;` `&gt;`. Shape:
 
   ```
   📢 <b>JobQuest update</b>

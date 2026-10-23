@@ -5,7 +5,9 @@
     .venv/bin/python scripts/announce.py --file msg.txt --test   send only to the owner, to check the look
     .venv/bin/python scripts/announce.py --file msg.txt --send   send to every user
 
-The text is Telegram HTML (<b>bold</b>); see features/broadcast.py.
+The text is Telegram HTML (<b>bold</b>); see features/broadcast.py. Blocks are
+separated by blank lines in the file; the script always puts exactly two empty
+lines between them.
 
 The preview prints the recipient count, the exact text, and whether the spam
 guards (features/broadcast.py) allow a send right now. Exit codes: 0 sent or
@@ -16,6 +18,7 @@ How to write the text: see "Update announcements" in CLAUDE.md.
 import argparse
 import os
 import pathlib
+import re
 import sys
 import urllib.parse
 
@@ -58,6 +61,8 @@ def main():
 
     load_dotenv(ROOT / ".env")
     text = pathlib.Path(args.file).read_text(encoding="utf-8").strip()
+    # House style (Alwin, 2026-10-23): exactly two empty lines between blocks.
+    text = re.sub(r"\n[ \t]*(?:\n[ \t]*)+", "\n\n\n", text)
     if not text:
         print("The file is empty.")
         return 2
