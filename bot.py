@@ -921,10 +921,12 @@ class CPUTracker:
 cpu_tracker = CPUTracker(update_interval=2.0)
 
 
-# Stop signals before main() is polling. Nothing is worth saving yet, except
-# the first alert check (it starts 20 s after the scheduler), which stops at
-# its next alert once shutdown_requested is set. main() replaces this handler
-# once polling starts. Exit well inside systemd's 30 s TimeoutStopSec.
+# Stop signals during startup. Until main() starts the scheduler nothing is in
+# flight, so SIGTERM keeps its default action: the kernel ends the process at
+# once, even while the main thread sits in a long C call such as the ~50 s
+# sentence-transformers import (a Python handler would wait for that to
+# return). From scheduler start until polling (well under a second) this
+# handler covers the first alert check; then main() hands over to PTB.
 def exit_during_startup(signum, frame):
     logger.info(f"🛑 Received signal {signum} during startup, exiting")
     shutdown_requested.set()
@@ -932,9 +934,6 @@ def exit_during_startup(signum, frame):
         logger.warning("⚠️ Alert check still running; exiting anyway")
     logging.shutdown()
     os._exit(0)
-
-signal.signal(signal.SIGTERM, exit_during_startup)
-signal.signal(signal.SIGINT, exit_during_startup)
 
 # Optional imports for enhanced features
 try:
@@ -8485,6 +8484,8 @@ def main():
             next_run_time=datetime.now(pytz.UTC) + timedelta(minutes=10),
         )
 
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(sig, exit_during_startup)
         scheduler.start()
         logger.info("🚀 Background scheduler started:")
         logger.info("   - Alert checks every 30 minutes (memory-aware)")
