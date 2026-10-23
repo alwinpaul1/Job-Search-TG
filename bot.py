@@ -7704,6 +7704,23 @@ def check_all_alerts(bot: Bot):
         if shutdown_requested.is_set():
             logger.info(f"🛑 Shutdown requested: stopping alert check after {i}/{len(active_alerts)} alerts")
             break
+        # A cycle takes ~20 min. Re-read the alert so one deleted or paused
+        # (by its user or an admin) since the cycle started gets nothing, and
+        # edits to keywords, filters or settings apply right away.
+        conn = None
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM alerts WHERE id = %s AND is_active = 1", (alert["id"],))
+            alert = cursor.fetchone()
+        except Exception:
+            logger.exception(f"Could not re-read alert {alert['id']}; checking the loaded copy")
+        finally:
+            if conn:
+                db_pool.return_connection(conn)
+        if alert is None:
+            logger.info(f"Skipping alert {active_alerts[i]['id']}: deleted or paused since the cycle started")
+            continue
         try:
             check_single_alert(alert, bot)
         except Exception:
