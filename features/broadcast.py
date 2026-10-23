@@ -5,16 +5,11 @@ the VPS (run from a Claude Code session), so nobody can send one from Telegram:
 
     .venv/bin/python scripts/announce.py --file msg.txt          preview, sends nothing
     .venv/bin/python scripts/announce.py --file msg.txt --send   send to every user
-    add --admins to send only to admins (the `admins` table) instead
-
-Two audiences: "all" (every user) and "admins". Admin features (invites,
-admin screens) go in a separate admin announcement so users never see tools
-they can't use. Each audience has its own cooldown.
 
 Spam guards, enforced in the `broadcasts` table:
 - a send claims its row under a table lock, so two runs at once send once;
-- after an update goes out, no other one to the same audience for COOLDOWN_HOURS;
-- the exact same text is never sent twice to the same audience.
+- after an update goes out, no other one is allowed for COOLDOWN_HOURS;
+- the exact same text is never sent twice.
 
 The text goes out exactly as written, as plain text. Recipients: every chat in
 user_settings or alerts, at ~20 messages/second. How to write the text: see
@@ -30,7 +25,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_SQL = ("""
+SCHEMA_SQL = """
     CREATE TABLE IF NOT EXISTS broadcasts (
         id SERIAL PRIMARY KEY,
         admin_id BIGINT NOT NULL,
@@ -43,10 +38,7 @@ SCHEMA_SQL = ("""
         blocked INTEGER,
         failed INTEGER
     )
-""",
-    "ALTER TABLE broadcasts ADD COLUMN IF NOT EXISTS audience TEXT NOT NULL DEFAULT 'all'",
-)
-AUDIENCES = ("all", "admins")
+"""
 
 COOLDOWN_HOURS = 24
 MAX_CHARS = 4096          # Telegram's limit for one text message
@@ -54,60 +46,56 @@ _SEND_GAP_S = 0.05
 _API = "https://api.telegram.org/bot{token}/sendMessage"
 
 
-def recipients(cursor, audience="all"):
-    if audience == "admins":
-        cursor.execute("SELECT chat_id FROM admins")
-    else:
-        cursor.execute(
-            """SELECT chat_id FROM user_settings
-               UNION
-               SELECT chat_id FROM alerts"""
-        )
+def recipients(cursor):
+    cursor.execute(
+        """SELECT chat_id FROM user_settings
+           UNION
+           SELECT chat_id FROM alerts"""
+    )
     return sorted(row["chat_id"] for row in cursor.fetchall())
 
 
-def refusal(cursor, text, exclude_id=None, audience="all"):
+def refusal(cursor, text, exclude_id=None):
     """Why an update with this text may not go out now, or None if it may."""
     cursor.execute(
         """SELECT admin_name, EXTRACT(EPOCH FROM NOW() - sent_at) / 3600 AS hours_ago
            FROM broadcasts
-           WHERE status IN ('sending', 'sent') AND audience = %s
+           WHERE status IN ('sending', 'sent')
              AND sent_at > NOW() - make_interval(hours => %s)
              AND id IS DISTINCT FROM %s
            ORDER BY sent_at DESC LIMIT 1""",
-        (audience, COOLDOWN_HOURS, exclude_id),
+        (COOLDOWN_HOURS, exclude_id),
     )
     row = cursor.fetchone()
     if row:
         ago = float(row["hours_ago"])
         who = row["admin_name"] or "Someone"
-        return (f"{who} sent an update to {audience} {ago:.0f} h ago. To avoid spamming, "
+        return (f"{who} sent an update {ago:.0f} h ago. To avoid spamming users, "
                 f"the next one is allowed in {COOLDOWN_HOURS - ago:.0f} h.")
     cursor.execute(
         """SELECT 1 FROM broadcasts
-           WHERE status IN ('sending', 'sent') AND audience = %s AND text = %s
-             AND id IS DISTINCT FROM %s
+           WHERE status IN ('sending', 'sent') AND text = %s AND id IS DISTINCT FROM %s
            LIMIT 1""",
-        (audience, text, exclude_id),
+        (text, exclude_id),
     )
     if cursor.fetchone():
         return "This exact message was already sent before."
     return None
 
 
-def claim(cursor, text, sender_id, sender_name, audience="all"):
+def claim(cursor, text, sender_id, sender_name):
     """Reserve a send: returns (broadcast id, None), or (None, reason) if refused.
 
     Commit right after, before sending, so the cooldown holds even if the
     send is interrupted."""
     cursor.execute("LOCK TABLE broadcasts IN SHARE ROW EXCLUSIVE MODE")
-    reason = refusal(cursor, text, audience=audience)
+    reason = refusal(cursor, text)
     if reason:
         return None, reason
     cursor.execute(
-        """INSERT INTO broadcasts (admin_id, admin_name, text, status, sent_at, audience)
-           VALUES (%s, %s, %s, 'sending', NOW(), %s) RETURNING id""",
-        (sender_id, sender_name, text, audience),
+        """INSERT INTO broadcasts (admin_id, admin_name, text, status, sent_at)
+           VALUES (%s, %s, %s, 'sending', NOW()) RETURNING id""",
+        (sender_id, sender_name, text),
     )
     return cursor.fetchone()["id"], None
 

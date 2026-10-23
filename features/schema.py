@@ -3,7 +3,7 @@ from features import access, admins, alert_settings, broadcast, companies, saved
 
 STATEMENTS = (
     companies.SCHEMA_SQL,
-    *broadcast.SCHEMA_SQL,
+    broadcast.SCHEMA_SQL,
     *alert_settings.SCHEMA_SQL,
     *saved_status.SCHEMA_SQL,
     *access.SCHEMA_SQL,
