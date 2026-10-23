@@ -18,12 +18,9 @@ e.g. a page-layout change), many unreadable LinkedIn job pages, Jev down (Clef
 judging), Jev and Clef both down, the database not reachable, the bot
 restarting itself, and a start after an unclean stop (crash, out-of-memory kill).
 
-What the bot can't report itself (the server, the bot process or its network
-down; rounds that stop finishing) needs an outside check: beat() pings the
-Cloudflare Worker in watchdog/ every 5 min, which messages the owner when the
-pings stop for 30 min or no round has finished for 2 h. Not deployed at the
-moment (see CLAUDE.md); without WATCHDOG_URL the ping is skipped. Not reported, because the bot handles them:
-single LinkedIn 429s, memory clean-ups, planned restarts.
+Not reported, because the bot handles them: single LinkedIn 429s, memory
+clean-ups, planned restarts. The bot can't report its own server being down;
+that would need a check from outside.
 
 Messages go straight to the Bot API over HTTPS, so they work from any thread
 and during a restart. Nothing here raises: a failed report is only logged.
@@ -47,7 +44,6 @@ _owner = [None]
 _lock = threading.Lock()
 _open = {}          # kind -> {"since": epoch, "last_sent": epoch}
 _cycle = None       # notes collected during one alert-check round
-_last_round_end = [time.time()]   # start counts as a finished round for the watchdog
 
 
 def setup(owner_id):
@@ -186,7 +182,6 @@ def cycle_end(interrupted=False):
     c, _cycle = _cycle, None
     if c is None or interrupted:
         return
-    _last_round_end[0] = time.time()
     n = c["alerts"]
     found, cleared = [], []
 
@@ -223,12 +218,10 @@ def cycle_end(interrupted=False):
         resolved(*cleared)
 
 
-# --- Heartbeat --------------------------------------------------------------
+# --- Database check --------------------------------------------------------
 
-def beat(get_conn, return_conn):
-    """Every few minutes: check the database, then tell the outside watchdog
-    the bot is alive and when it last finished a round."""
-    db_ok = True
+def check_database(get_conn, return_conn):
+    """Every few minutes: report the database if it stops answering, and when it's back."""
     try:
         conn = get_conn()
         try:
@@ -239,18 +232,6 @@ def beat(get_conn, return_conn):
         finally:
             return_conn(conn)
     except Exception as e:
-        db_ok = False
         problem(("db", f"The database is not reachable ({type(e).__name__})"))
-    if db_ok:
-        resolved(("db", "The database works again"))
-
-    url = os.environ.get("WATCHDOG_URL", "").strip()
-    secret = os.environ.get("WATCHDOG_SECRET", "").strip()
-    if not url or not secret:
         return
-    try:
-        requests.post(url.rstrip("/") + "/beat", timeout=10,
-                      headers={"Authorization": f"Bearer {secret}"},
-                      json={"round_end": int(_last_round_end[0]), "db_ok": db_ok})
-    except Exception as e:
-        logger.warning(f"Watchdog ping failed: {e}")
+    resolved(("db", "The database works again"))

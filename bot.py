@@ -8536,14 +8536,14 @@ def main():
             next_run_time=datetime.now(pytz.UTC) + timedelta(minutes=10),
         )
 
-        # Database check + ping to the outside watchdog (features/ops_alerts.py, watchdog/)
+        # Report the database to the owner if it stops answering (features/ops_alerts.py)
         scheduler.add_job(
-            ops_alerts.beat,
+            ops_alerts.check_database,
             "interval",
             minutes=5,
             args=[get_db_connection, db_pool.return_connection],
             max_instances=1,
-            id="watchdog_beat",
+            id="database_check",
             next_run_time=datetime.now(pytz.UTC) + timedelta(seconds=30),
         )
 
