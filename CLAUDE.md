@@ -196,7 +196,9 @@ How to write the text:
 - `python-telegram-bot` must stay **13.13** (13.14/13.15 hard-pin `tornado==6.1`, which has high CVEs; 13.13 allows `tornado>=6.1`).
 - `jobquest` was installed from a wheel at `/tmp/jobquest-0.1.12-py3-none-any.whl` that no longer exists. Its source is Alwin's repo github.com/alwinpaul1/JobQuest: commit `db4ff80` matches the installed 0.1.12 file for file (checked 2026-10-23), and `requirements.lock` pins it there. Don't change its version as a side effect of other work.
 - `requirements.lock` is the exact installed set on the VPS (`uv pip freeze`); rebuild a venv from it, not from `requirements.txt`. Regenerate it after any package change.
-- transformers is NOT upgraded to 5.x (its high-CVE fix) because pinned sentence-transformers 5.1.0 predates transformers v5; the CVE requires loading untrusted model files, which the bot never does (only TechWolf/JobBERT-v3).
+- transformers 5.10.0, sentence-transformers 5.6.0, torch 2.13.0 (2026-10-23, to clear their CVEs). JobBERT-v3 embeddings were compared before and after: identical to 6e-8.
+- setuptools must stay below 81: APScheduler 3.6.3 (hard-pinned by PTB 13.13) imports `pkg_resources`, which setuptools 81 removed. Its open advisory only affects building sdists.
+- The venv has no pip; use uv (`uv pip sync --python .venv/bin/python requirements.lock`).
 
 ## Common Pitfalls
 
