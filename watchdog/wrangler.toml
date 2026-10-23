@@ -1,0 +1,17 @@
+# JobQuest watchdog (see src/index.js). Deploy: cd watchdog && wrangler deploy
+# Secrets, set once with `wrangler secret put`: WATCHDOG_SECRET, TELEGRAM_BOT_TOKEN.
+name = "jobquest-watchdog"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+account_id = "ACCOUNT_ID"   # NOT the nexdash account (Alwin, 2026-10-23)
+
+[vars]
+OWNER_CHAT_ID = "7744296624"   # Alwin, the master admin
+
+[triggers]
+crons = ["*/10 * * * *"]
+
+[[kv_namespaces]]
+binding = "STATE"
+id = "KV_NAMESPACE_ID"   # wrangler kv namespace create jobquest-watchdog-state
