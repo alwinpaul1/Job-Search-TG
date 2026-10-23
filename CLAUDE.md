@@ -46,7 +46,7 @@ New features go in `features/` as helper modules that bot.py imports and calls. 
 | `saved_status` | 3-hourly sweep setting `saved_jobs.closed_at`; "Remove closed" button | scheduler, Saved Jobs |
 | `keyboards` | Alert job message keyboard; Save and Block swap one button each so neither wipes the other | checker, save/unsave callbacks |
 | `handlers` | Callbacks `bc_*`, `ams_*`, `sj_rmclosed` in dispatcher group 3 | `main()` |
-| `broadcast` | Update announcements to every chat in `user_settings` ∪ `alerts` (~20 msg/s). No chat command: they are sent only from the server with `scripts/announce.py` (preview by default, `--send` to send). Spam guards in the `broadcasts` table: a send claims its row under a table lock; 24 h cooldown; identical text never sent twice. Imports no telegram code (talks to the Bot API over HTTPS) | `scripts/announce.py` |
+| `broadcast` | Update announcements to every chat in `user_settings` ∪ `alerts`, or with `--admins` to the `admins` table only (~20 msg/s). No chat command: they are sent only from the server with `scripts/announce.py` (preview by default, `--send` to send). Spam guards in the `broadcasts` table: a send claims its row under a table lock; 24 h cooldown and no repeated text, both per audience (`broadcasts.audience`: all / admins). Imports no telegram code (talks to the Bot API over HTTPS) | `scripts/announce.py` |
 | `access` | Invite-only gate. A `TypeHandler` in dispatcher group -1 runs before every handler and stops updates from anyone who is not an admin (`ADMIN_USER_IDS`) or in `allowed_users`, with an invite-only reply that names the admins' @usernames (read from `user_settings`, so a renamed admin shows up after their next /start). Admins send `/invite` for a one-time link (`t.me/<bot>?start=inv_<code>`, 24 hours, row in `invites`); opening it redeems the code atomically and /start then runs as normal, and the inviting admin gets a message. Allowed IDs are cached and reloaded every 5 min (last good list kept if the DB fails). `allowed_users` was filled once, when created, from the users already there | `main()`, admin delete-user (`revoke`) |
 | `admins` | Master-admin (owner) controls. `/admins` or 👑 Admins in `/admin`: add an admin (picked from invited users) or remove one, each with a confirm step; the owner can't be removed. 📨 Invites in `/admin`: the latest 15 invite links with status, ✖️ cancels an unused one whoever made it (`invites.cancelled_at`). Admins live in the `admins` table (seeded once from bot.py's `ADMIN_USER_IDS`); at startup and after each change the module rewrites the `ADMIN_USER_IDS` set in place, so every `in ADMIN_USER_IDS` check is live. Callbacks `own_*` (owner) and `acc_invite` (🔗 Invite someone, any admin) | `main()`, `/admin` user list (`panel_rows`) |
 | `schema` | Idempotent DDL for the above, run from `init_db()` | `init_db()` |
@@ -136,16 +136,19 @@ There is no `/update` command. Announcements are sent only from the server, from
 cd /root/Job-Search-TG
 .venv/bin/python scripts/announce.py --file msg.txt          # preview: recipient count, exact text, whether a send is allowed now
 .venv/bin/python scripts/announce.py --file msg.txt --send   # send to every chat in user_settings ∪ alerts
+.venv/bin/python scripts/announce.py --file admin.txt --admins --send   # send to admins only (the admins table)
 ```
 
-The text goes out exactly as written, as plain text. At most one update per 24 hours, and the same text never twice, so bundle changes into one message.
+**Every update has two parts, and the admin part is never skipped** (Alwin, 2026-10-23). Whenever a change touches what admins do (invites, `/admin` screens, admin rights, anything Aravind or another admin needs to know), write a separate admin announcement and send it with `--admins`, alongside the users' one. Admin features never go in the all-users message: users can't use them. Each audience has its own 24 h limit, so sending both is fine.
+
+The text goes out exactly as written, as plain text. At most one update per 24 hours per audience (users, admins), and the same text never twice, so bundle changes into one message per audience.
 
 How to write the text:
 - Write it with the `unslop` skill. No hype, no filler.
 - Keep it short: a one-line opener, then one line per change. About 5 lines at most, readable in a few seconds on a phone.
 - Say what changed and where to find it ("My Alerts → pick an alert → 🌐 German Language"), not how it was built.
 - At most one emoji per line, used as a marker.
-- Show the draft to Alwin and get a yes before running with `--send`. Never send one on your own.
+- Show both drafts (users and admins) to Alwin and get a yes before running with `--send`. Never send one on your own.
 
 ## Key Globals & Singletons
 
