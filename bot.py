@@ -921,29 +921,20 @@ class CPUTracker:
 cpu_tracker = CPUTracker(update_interval=2.0)
 
 
-# Signal handlers for graceful shutdown
-def signal_handler(signum, frame):
-    """Handle shutdown signals gracefully"""
-    signal_names = {signal.SIGTERM: "SIGTERM", signal.SIGINT: "SIGINT"}
-    signal_name = signal_names.get(signum, f"Signal {signum}")
-    logger.info(f"🛑 Received {signal_name}, initiating graceful shutdown...")
-    
-    with global_state_lock:
-        shutdown_requested.set()
-        heartbeat_active.clear()
-    
-    # Give some time for cleanup before forcing exit
-    threading.Timer(30.0, force_exit).start()
+# Stop signals before main() is polling. Nothing is worth saving yet, except
+# the first alert check (it starts 20 s after the scheduler), which stops at
+# its next alert once shutdown_requested is set. main() replaces this handler
+# once polling starts. Exit well inside systemd's 30 s TimeoutStopSec.
+def exit_during_startup(signum, frame):
+    logger.info(f"🛑 Received signal {signum} during startup, exiting")
+    shutdown_requested.set()
+    if not scheduler_lock.acquire(timeout=20):
+        logger.warning("⚠️ Alert check still running; exiting anyway")
+    logging.shutdown()
+    os._exit(0)
 
-def force_exit():
-    """Force exit if graceful shutdown takes too long"""
-    logger.warning("⚠️ Force exit after 30 seconds")
-    os._exit(1)
-
-# Register signal handlers (Windows compatible)
-if hasattr(signal, 'SIGTERM'):
-    signal.signal(signal.SIGTERM, signal_handler)
-signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, exit_during_startup)
+signal.signal(signal.SIGINT, exit_during_startup)
 
 # Optional imports for enhanced features
 try:
@@ -8143,46 +8134,6 @@ def main():
     import argparse
     import gc
 
-    def signal_handler(signum, frame):
-        logger.info(f"Received signal {signum}, shutting down gracefully...")
-        shutdown_requested.set()
-        
-        # Shutdown scheduler
-        if 'scheduler' in locals():
-            try:
-                scheduler.shutdown(wait=False)
-                logger.info("✅ Scheduler shutdown complete")
-            except Exception as e:
-                logger.error(f"Error shutting down scheduler: {e}")
-        
-        # Shutdown thread pool
-        if 'executor' in globals():
-            try:
-                executor.shutdown(wait=False)
-                logger.info("✅ Thread pool shutdown complete")
-            except Exception as e:
-                logger.error(f"Error shutting down thread pool: {e}")
-        
-        # Cleanup models
-        try:
-            unload_jobbert_model()
-            logger.info("✅ Model cleanup complete")
-        except Exception as e:
-            logger.error(f"Error during model cleanup: {e}")
-        
-        # Final memory cleanup
-        try:
-            force_memory_cleanup()
-            logger.info("✅ Final memory cleanup complete")
-        except Exception as e:
-            logger.error(f"Error during final cleanup: {e}")
-        
-        logger.info("🏁 Graceful shutdown complete")
-        sys.exit(0)
-
-    # Register signal handlers for graceful shutdown
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
 
     parser = argparse.ArgumentParser(description="JobQuestTG Bot")
     parser.add_argument("--migrate-only", action="store_true",
