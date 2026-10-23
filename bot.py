@@ -169,7 +169,7 @@ diagnostic_file_handler.setFormatter(
 logger.addHandler(diagnostic_file_handler)
 
 # Feature modules (features/): blocklist, German-requirement check, saved-job status.
-from features import alert_settings, broadcast, companies, keyboards, saved_status, send_filters
+from features import access, alert_settings, broadcast, companies, keyboards, saved_status, send_filters
 from features import handlers as feature_handlers
 from features import schema as feature_schema
 logging.getLogger("features").addHandler(diagnostic_file_handler)
@@ -3525,6 +3525,7 @@ def admin_delete_user_confirm(update: Update, context: CallbackContext):
         cursor.execute("DELETE FROM alerts WHERE chat_id = %s", (chat_id,))
         cursor.execute("DELETE FROM user_settings WHERE chat_id = %s", (chat_id,))
         companies.delete_chat(cursor, chat_id)
+        access.revoke(cursor, chat_id)
         conn.commit()
     finally:
         if conn:
@@ -8804,6 +8805,15 @@ def main():
         preferences_menu=preferences_menu,
         saved_jobs_menu=saved_jobs_menu,
         group=3,
+    )
+    # Invite-only: a group -1 gate stops updates from anyone not invited;
+    # admins create links with /invite (features/access.py).
+    access.register(
+        dispatcher,
+        get_conn=get_db_connection,
+        return_conn=db_pool.return_connection,
+        admin_ids=ADMIN_USER_IDS,
+        command_group=3,
     )
     # Owner-only /update: announce a bot update to every user (features/broadcast.py).
     broadcast.register(

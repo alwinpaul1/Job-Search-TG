@@ -47,6 +47,7 @@ New features go in `features/` as helper modules that bot.py imports and calls. 
 | `keyboards` | Alert job message keyboard; Save and Block swap one button each so neither wipes the other | checker, save/unsave callbacks |
 | `handlers` | Callbacks `bc_*`, `ams_*`, `sj_rmclosed` in dispatcher group 3 | `main()` |
 | `broadcast` | Owner-only `/update <text>` (`OWNER_USER_ID`, Alwin; other admins incl. Aravind can't): preview + ✅ Send/✖️ Cancel, then sends to every chat in `user_settings` ∪ `alerts` (~20 msg/s, background thread). Spam guards in the `broadcasts` table: Send claims a pending row once under a table lock; 24 h cooldown; identical text never sent twice. The owner gets the summary | `main()` |
+| `access` | Invite-only gate. A `TypeHandler` in dispatcher group -1 runs before every handler and stops updates from anyone who is not an admin (`ADMIN_USER_IDS`) or in `allowed_users`, with an invite-only reply. Admins send `/invite` for a one-time link (`t.me/<bot>?start=inv_<code>`, 7 days, row in `invites`); opening it redeems the code atomically and /start then runs as normal, and the inviting admin gets a message. Allowed IDs are cached and reloaded every 5 min (last good list kept if the DB fails). `allowed_users` was filled once, when created, from the users already there | `main()`, admin delete-user (`revoke`) |
 | `schema` | Idempotent DDL for the above, run from `init_db()` | `init_db()` |
 
 The German setting lives in its own `alerts` column, NOT in the `filters` JSON: the edit-alert and admin filter flows rewrite `filters` wholesale.
@@ -78,7 +79,7 @@ Key sections of `bot.py` in order:
 
 PostgreSQL (`job_alerts` database, user `jobbot`). Config via `DATABASE_URL` env var or individual `POSTGRES_*` vars in `.env`.
 
-**Tables:** `alerts`, `sent_jobs`, `user_settings`, `saved_jobs`, `job_details_cache`, `blocked_companies` (from `features/companies.py`), `broadcasts` (from `features/broadcast.py`)
+**Tables:** `alerts`, `sent_jobs`, `user_settings`, `saved_jobs`, `job_details_cache`, `blocked_companies` (from `features/companies.py`), `broadcasts` (from `features/broadcast.py`), `allowed_users` + `invites` (from `features/access.py`)
 
 **`user_settings`** also stores `first_name` and `username` (updated on every `/start`) for admin panel display. Existing users are backfilled from the Telegram API on startup.
 
@@ -118,9 +119,13 @@ Entry point: `/admin` (restricted to the `ADMIN_USER_IDS` set, hardcoded at ~lin
 
 **Pause/Resume-All** (`admin_paused` column): Pause-All sets `is_active=0, admin_paused=1` on the user's active alerts; Resume-All re-activates only `admin_paused=1` rows, never a user's own individually-paused alerts. All four `is_active` writers maintain this invariant.
 
-**Delete user flow:** `admin_delete_user_start` → confirmation → `admin_delete_user_confirm` deletes `saved_jobs`, `alerts` (cascades to `sent_jobs`/`job_details_cache`), and `user_settings`.
+**Delete user flow:** `admin_delete_user_start` → confirmation → `admin_delete_user_confirm` deletes `saved_jobs`, `alerts` (cascades to `sent_jobs`/`job_details_cache`), and `user_settings`, and revokes access (`allowed_users`), so the person needs a new invite to come back.
 
 **Stale callback fallback** (~line 8700): A standalone `CallbackQueryHandler` (pattern `^adm_`) in group 2 catches admin button presses that arrive after a bot restart (when `ConversationHandler` state is lost) and re-routes them. Edit flows (`adm_editkw_/editloc_/editflt_/flt_*`) can't work without live conversation state, so the fallback answers "session expired, run /admin". Similar stale fallbacks exist in group 0 for My-Alerts buttons and saved-jobs buttons (🗑️/Prev/Next).
+
+## Invite-only access
+
+The bot is invite-only. To add someone, an admin (Alwin or Aravind) sends `/invite` to the bot and forwards the link; it works for one person and expires after 7 days. To remove someone, use `/admin` → user → Delete user, which also revokes access. Deleting rows by hand in SQL leaves the `allowed_users` row behind: delete it too (`DELETE FROM allowed_users WHERE chat_id = …`), or the person can come back without an invite.
 
 ## Update announcements (`/update`)
 

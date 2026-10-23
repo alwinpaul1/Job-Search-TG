@@ -8,5 +8,6 @@
     saved_status        scheduled sweep that marks closed saved jobs
     keyboards           the inline keyboard on alert job messages
     handlers            Telegram callbacks for all of the above
-    broadcast           admin /update: announce a bot update to every user
+    broadcast           owner /update: announce a bot update to every user
+    access              invite-only gate and admin /invite links
 """
