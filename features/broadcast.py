@@ -1,14 +1,18 @@
-"""Admin /update: announce a bot update to every user.
+"""Admin /update: announce a bot update to every user, without spamming them.
 
-    /update <text>   admin only; shows a preview with the recipient count
-    ✅ Send / ✖️ Cancel buttons (callbacks bcast_send / bcast_cancel)
+    /update <text>   admin only; saves a pending update and shows a preview
+    ✅ Send / ✖️ Cancel buttons (callbacks bcast_send_<id> / bcast_cancel_<id>)
 
-Nothing is sent until the admin taps Send. The text goes out exactly as
-typed, as plain text, so Telegram formatting characters can't break it.
-Recipients: every chat in user_settings or alerts. Sending runs in its own
-thread at ~20 messages/second, under Telegram's 30/s bot limit, and the
-admin gets a sent / blocked / failed summary at the end.
+Spam guards, enforced in the database so they hold across both admins,
+double taps and restarts:
+- each preview is a `broadcasts` row; Send claims it once (pending -> sending)
+  under a table lock, so two taps or two admins can't both send it;
+- after any update goes out, no other one is allowed for COOLDOWN_HOURS;
+- the exact same text is never sent twice.
+Every admin is told when an update goes out.
 
+The text goes out exactly as typed, as plain text. Recipients: every chat in
+user_settings or alerts, at ~20 messages/second in a background thread.
 How to write the text: see "Update announcements" in CLAUDE.md.
 """
 import logging
@@ -21,8 +25,23 @@ from telegram.ext import CallbackQueryHandler, CommandHandler
 
 logger = logging.getLogger(__name__)
 
+SCHEMA_SQL = """
+    CREATE TABLE IF NOT EXISTS broadcasts (
+        id SERIAL PRIMARY KEY,
+        admin_id BIGINT NOT NULL,
+        admin_name TEXT,
+        text TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TIMESTAMP DEFAULT NOW(),
+        sent_at TIMESTAMP,
+        sent INTEGER,
+        blocked INTEGER,
+        failed INTEGER
+    )
+"""
+
+COOLDOWN_HOURS = 24
 _SEND_GAP_S = 0.05
-_PENDING_KEY = "broadcast_text"
 # Telegram's limit for one text message.
 _MAX_CHARS = 4096
 
@@ -34,6 +53,35 @@ def recipients(cursor):
            SELECT chat_id FROM alerts"""
     )
     return sorted(row["chat_id"] for row in cursor.fetchall())
+
+
+def refusal(cursor, text, exclude_id=None):
+    """Why an update with this text may not go out now, or None if it may."""
+    cursor.execute(
+        """SELECT admin_name, EXTRACT(EPOCH FROM NOW() - sent_at) / 3600 AS hours_ago
+           FROM broadcasts
+           WHERE status IN ('sending', 'sent')
+             AND sent_at > NOW() - make_interval(hours => %s)
+             AND id IS DISTINCT FROM %s
+           ORDER BY sent_at DESC LIMIT 1""",
+        (COOLDOWN_HOURS, exclude_id),
+    )
+    row = cursor.fetchone()
+    if row:
+        ago = float(row["hours_ago"])
+        wait = COOLDOWN_HOURS - ago
+        who = row["admin_name"] or "An admin"
+        return (f"{who} sent an update {ago:.0f} h ago. To avoid spamming users, "
+                f"the next one is allowed in {wait:.0f} h.")
+    cursor.execute(
+        """SELECT 1 FROM broadcasts
+           WHERE status IN ('sending', 'sent') AND text = %s AND id IS DISTINCT FROM %s
+           LIMIT 1""",
+        (text, exclude_id),
+    )
+    if cursor.fetchone():
+        return "This exact message was already sent before."
+    return None
 
 
 def send_all(bot, chat_ids, text, gap_s=_SEND_GAP_S):
@@ -65,17 +113,21 @@ class _Handlers:
         self.return_conn = return_conn
         self.admin_ids = admin_ids
 
-    def _count(self):
+    def _db(self, fn):
         conn = self.get_conn()
         try:
-            ids = recipients(conn.cursor())
+            result = fn(conn.cursor())
             conn.commit()
-            return ids
+            return result
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             self.return_conn(conn)
 
     def command(self, update, context):
-        if update.effective_user.id not in self.admin_ids:
+        user = update.effective_user
+        if user.id not in self.admin_ids:
             return
         # Everything after "/update" (space or newline), line breaks kept.
         parts = (update.message.text or "").split(None, 1)
@@ -89,43 +141,96 @@ class _Handlers:
         if len(text) > _MAX_CHARS:
             update.message.reply_text(f"Too long: {len(text)} characters, Telegram allows {_MAX_CHARS}.")
             return
-        context.user_data[_PENDING_KEY] = text
-        n = len(self._count())
+
+        def work(cur):
+            reason = refusal(cur, text)
+            if reason:
+                return reason, None, 0
+            cur.execute(
+                "INSERT INTO broadcasts (admin_id, admin_name, text) VALUES (%s, %s, %s) RETURNING id",
+                (user.id, user.first_name, text),
+            )
+            return None, cur.fetchone()["id"], len(recipients(cur))
+
+        reason, bid, n = self._db(work)
+        if reason:
+            update.message.reply_text(f"⛔ Not sent. {reason}")
+            return
         update.message.reply_text(
             f"Preview. This goes to {n} users exactly as shown:\n\n{text}",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton(f"✅ Send to {n}", callback_data="bcast_send"),
-                InlineKeyboardButton("✖️ Cancel", callback_data="bcast_cancel"),
+                InlineKeyboardButton(f"✅ Send to {n}", callback_data=f"bcast_send_{bid}"),
+                InlineKeyboardButton("✖️ Cancel", callback_data=f"bcast_cancel_{bid}"),
             ]]),
             disable_web_page_preview=True,
         )
 
     def confirm(self, update, context):
         query = update.callback_query
-        if update.effective_user.id not in self.admin_ids:
+        user = update.effective_user
+        if user.id not in self.admin_ids:
             query.answer()
             return
-        text = context.user_data.pop(_PENDING_KEY, None)
-        if query.data == "bcast_cancel" or not text:
-            query.answer("Cancelled" if text else "Nothing to send. Run /update again.")
+        action, bid = context.match.group(1), int(context.match.group(2))
+
+        def work(cur):
+            # One claim at a time across all admins and dispatcher threads.
+            cur.execute("LOCK TABLE broadcasts IN SHARE ROW EXCLUSIVE MODE")
+            cur.execute("SELECT status, text FROM broadcasts WHERE id = %s", (bid,))
+            row = cur.fetchone()
+            if not row or row["status"] != "pending":
+                return "done", None, None
+            if action == "cancel":
+                cur.execute("UPDATE broadcasts SET status = 'cancelled' WHERE id = %s", (bid,))
+                return "cancelled", None, None
+            reason = refusal(cur, row["text"], exclude_id=bid)
+            if reason:
+                cur.execute("UPDATE broadcasts SET status = 'refused' WHERE id = %s", (bid,))
+                return "refused", reason, None
+            cur.execute(
+                "UPDATE broadcasts SET status = 'sending', sent_at = NOW() WHERE id = %s", (bid,)
+            )
+            return "claimed", row["text"], recipients(cur)
+
+        outcome, info, chat_ids = self._db(work)
+        try:
             query.edit_message_reply_markup(reply_markup=None)
+        except telegram.error.BadRequest:
+            pass
+        if outcome == "done":
+            query.answer("This update was already sent or cancelled.")
             return
-        chat_ids = self._count()
+        if outcome == "cancelled":
+            query.answer("Cancelled")
+            return
+        if outcome == "refused":
+            query.answer("Not sent")
+            query.message.reply_text(f"⛔ Not sent. {info}")
+            return
+
+        text = info
         query.answer(f"Sending to {len(chat_ids)} users…")
-        query.edit_message_reply_markup(reply_markup=None)
-        admin_chat = query.message.chat_id
         bot = context.bot
+        sender = user.first_name or "An admin"
 
         def run():
             sent, blocked, failed = send_all(bot, chat_ids, text)
-            logger.info(f"Update sent: {sent} sent, {blocked} blocked, {failed} failed")
+            logger.info(f"Update {bid} by {user.id}: {sent} sent, {blocked} blocked, {failed} failed")
             try:
-                bot.send_message(
-                    chat_id=admin_chat,
-                    text=f"📢 Update sent to {sent} users. Blocked the bot: {blocked}. Failed: {failed}.",
-                )
-            except telegram.error.TelegramError:
-                pass
+                self._db(lambda cur: cur.execute(
+                    "UPDATE broadcasts SET status = 'sent', sent = %s, blocked = %s, failed = %s WHERE id = %s",
+                    (sent, blocked, failed, bid),
+                ))
+            except Exception as e:
+                logger.error(f"Could not record update {bid} as sent: {e}")
+            summary = (f"📢 {sender} sent an update to {sent} users. "
+                       f"Blocked the bot: {blocked}. Failed: {failed}.\n"
+                       f"Next update allowed in {COOLDOWN_HOURS} h.")
+            for admin_id in self.admin_ids:
+                try:
+                    bot.send_message(chat_id=admin_id, text=summary)
+                except telegram.error.TelegramError:
+                    pass
 
         threading.Thread(target=run, name="update-broadcast", daemon=True).start()
 
@@ -133,4 +238,6 @@ class _Handlers:
 def register(dispatcher, *, get_conn, return_conn, admin_ids, group):
     h = _Handlers(get_conn, return_conn, admin_ids)
     dispatcher.add_handler(CommandHandler("update", h.command), group=group)
-    dispatcher.add_handler(CallbackQueryHandler(h.confirm, pattern=r"^bcast_(send|cancel)$"), group=group)
+    dispatcher.add_handler(
+        CallbackQueryHandler(h.confirm, pattern=r"^bcast_(send|cancel)_(\d+)$"), group=group
+    )

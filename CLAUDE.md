@@ -46,7 +46,7 @@ New features go in `features/` as helper modules that bot.py imports and calls. 
 | `saved_status` | 3-hourly sweep setting `saved_jobs.closed_at`; "Remove closed" button | scheduler, Saved Jobs |
 | `keyboards` | Alert job message keyboard; Save and Block swap one button each so neither wipes the other | checker, save/unsave callbacks |
 | `handlers` | Callbacks `bc_*`, `ams_*`, `sj_rmclosed` in dispatcher group 3 | `main()` |
-| `broadcast` | Admin `/update <text>`: preview + ✅ Send/✖️ Cancel, then sends to every chat in `user_settings` ∪ `alerts` (~20 msg/s, background thread), reports sent/blocked/failed | `main()` |
+| `broadcast` | Admin `/update <text>`: preview + ✅ Send/✖️ Cancel, then sends to every chat in `user_settings` ∪ `alerts` (~20 msg/s, background thread). Spam guards in the `broadcasts` table: Send claims a pending row once under a table lock; 24 h cooldown across all admins; identical text never sent twice. Every admin gets the summary | `main()` |
 | `schema` | Idempotent DDL for the above, run from `init_db()` | `init_db()` |
 
 The German setting lives in its own `alerts` column, NOT in the `filters` JSON: the edit-alert and admin filter flows rewrite `filters` wholesale.
@@ -78,7 +78,7 @@ Key sections of `bot.py` in order:
 
 PostgreSQL (`job_alerts` database, user `jobbot`). Config via `DATABASE_URL` env var or individual `POSTGRES_*` vars in `.env`.
 
-**Tables:** `alerts`, `sent_jobs`, `user_settings`, `saved_jobs`, `job_details_cache`, `blocked_companies` (from `features/companies.py`)
+**Tables:** `alerts`, `sent_jobs`, `user_settings`, `saved_jobs`, `job_details_cache`, `blocked_companies` (from `features/companies.py`), `broadcasts` (from `features/broadcast.py`)
 
 **`user_settings`** also stores `first_name` and `username` (updated on every `/start`) for admin panel display. Existing users are backfilled from the Telegram API on startup.
 
@@ -124,7 +124,7 @@ Entry point: `/admin` (restricted to the `ADMIN_USER_IDS` set, hardcoded at ~lin
 
 ## Update announcements (`/update`)
 
-When a change ships that users will notice, an admin sends `/update <text>` to the bot. It shows a preview with the recipient count, and nothing goes out until ✅ Send. The text reaches every chat in `user_settings` or `alerts`, exactly as typed, as plain text.
+When a change ships that users will notice, an admin sends `/update <text>` to the bot. It shows a preview with the recipient count, and nothing goes out until ✅ Send. The text reaches every chat in `user_settings` or `alerts`, exactly as typed, as plain text. At most one update per 24 hours across both admins, and the same text never twice, so bundle changes into one message.
 
 How to write the text:
 - Write it with the `unslop` skill. No hype, no filler.
