@@ -3,8 +3,9 @@
     /invite, or 🔗 Invite someone in /admin
                         admins only: a one-time link t.me/<bot>?start=inv_<code>,
                         valid INVITE_TTL_HOURS (24 h)
-    /start inv_<code>   redeems it (opening the link sends exactly this); the
-                        inviting admin and the master admin are told
+    /start inv_<code>   redeems it (opening the link sends exactly this); for
+                        another admin's invite, that admin and the master admin
+                        are told; the master admin's own invites join silently
 
 A TypeHandler in dispatcher group -1 runs before every other handler and stops
 updates from anyone else (DispatcherHandlerStop) after a short invite-only
@@ -212,6 +213,10 @@ class _Access:
         raise DispatcherHandlerStop
 
     def _tell_admins(self, bot, user, inviter, inviter_label):
+        # The owner's own invites join silently (his call, 2026-10-23); he can
+        # still see them under 📨 Invites.
+        if inviter == self.owner_id:
+            return
         name = person(user.first_name, user.username)
         notes = {inviter: f"✅ {name} joined with your invite."}
         if self.owner_id != inviter:

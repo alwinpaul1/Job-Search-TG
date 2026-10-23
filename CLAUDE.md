@@ -126,7 +126,7 @@ Entry point: `/admin` (restricted to the `ADMIN_USER_IDS` set). The set in bot.p
 
 ## Invite-only access
 
-The bot is invite-only. To add someone, an admin sends `/invite` (or taps 🔗 Invite someone in `/admin`) and forwards the link; it works for one person and expires after 24 hours. The inviting admin and Alwin (master admin) both get a message when it's used. Alwin alone can add or remove admins and see or cancel every invite (`/admins`, or 👑 Admins / 📨 Invites in `/admin`). To remove someone, use `/admin` → user → Delete user, which also revokes access. Deleting rows by hand in SQL leaves the `allowed_users` row behind: delete it too (`DELETE FROM allowed_users WHERE chat_id = …`), or the person can come back without an invite.
+The bot is invite-only. To add someone, an admin sends `/invite` (or taps 🔗 Invite someone in `/admin`) and forwards the link; it works for one person and expires after 24 hours. When someone joins with another admin's invite, that admin and Alwin (master admin) both get a message; Alwin's own invites join silently (his call). Every join shows under 📨 Invites. Alwin alone can add or remove admins and see or cancel every invite (`/admins`, or 👑 Admins / 📨 Invites in `/admin`). To remove someone, use `/admin` → user → Delete user, which also revokes access. Deleting rows by hand in SQL leaves the `allowed_users` row behind: delete it too (`DELETE FROM allowed_users WHERE chat_id = …`), or the person can come back without an invite.
 
 ## Update announcements (`/update`)
 
