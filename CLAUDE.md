@@ -130,7 +130,7 @@ The bot is invite-only. To add someone, an admin sends `/invite` (or taps 🔗 I
 
 ## Update announcements (`/update`)
 
-When a change ships that users will notice, Alwin (the owner, `OWNER_USER_ID`; no other admin) sends `/update <text>` to the bot. 📢 Send update in his `/admin` panel (owner only) explains this and says whether an update is allowed right now. It shows a preview with the recipient count, and nothing goes out until ✅ Send. The text reaches every chat in `user_settings` or `alerts`, exactly as typed, as plain text. At most one update per 24 hours, and the same text never twice, so bundle changes into one message.
+When a change ships that users will notice, Alwin (the owner, `OWNER_USER_ID`; no other admin) sends `/update <text>` to the bot. It shows a preview with the recipient count, and nothing goes out until ✅ Send. The text reaches every chat in `user_settings` or `alerts`, exactly as typed, as plain text. At most one update per 24 hours, and the same text never twice, so bundle changes into one message.
 
 How to write the text:
 - Write it with the `unslop` skill. No hype, no filler.

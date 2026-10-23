@@ -3,8 +3,6 @@
     /update <text>   owner only (OWNER_USER_ID in bot.py; other admins can't);
                      saves a pending update and shows a preview
     ✅ Send / ✖️ Cancel buttons (callbacks bcast_send_<id> / bcast_cancel_<id>)
-    📢 Send update in /admin (bcast_help, owner only): how-to and whether one is
-                     allowed right now
 
 Spam guards, enforced in the database so they hold across double taps,
 restarts and any future second sender:
@@ -168,26 +166,6 @@ class _Handlers:
             disable_web_page_preview=True,
         )
 
-    def help_button(self, update, context):
-        """📢 Send update in /admin: explain /update and say if one is allowed now."""
-        query = update.callback_query
-        if update.effective_user.id not in self.owner_ids:
-            query.answer("Only the master admin can do that.")
-            return
-
-        def work(cur):
-            # None never equals a sent text, so only the cooldown can refuse.
-            return refusal(cur, None), len(recipients(cur))
-        blocked, n = self._db(work)
-        query.answer()
-        status = f"⛔ Not right now. {blocked}" if blocked else f"✅ You can send one now. It goes to {n} users."
-        query.message.reply_text(
-            "📢 To announce an update, send:\n\n"
-            "/update your message\n\n"
-            "You'll see a preview with ✅ Send and ✖️ Cancel before anything goes out. "
-            f"One update per {COOLDOWN_HOURS} h, and the same text never twice.\n\n" + status
-        )
-
     def confirm(self, update, context):
         query = update.callback_query
         user = update.effective_user
@@ -261,7 +239,6 @@ class _Handlers:
 def register(dispatcher, *, get_conn, return_conn, owner_ids, group):
     h = _Handlers(get_conn, return_conn, owner_ids)
     dispatcher.add_handler(CommandHandler("update", h.command), group=group)
-    dispatcher.add_handler(CallbackQueryHandler(h.help_button, pattern=r"^bcast_help$"), group=group)
     dispatcher.add_handler(
         CallbackQueryHandler(h.confirm, pattern=r"^bcast_(send|cancel)_(\d+)$"), group=group
     )
