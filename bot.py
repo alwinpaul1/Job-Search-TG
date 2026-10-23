@@ -169,7 +169,7 @@ diagnostic_file_handler.setFormatter(
 logger.addHandler(diagnostic_file_handler)
 
 # Feature modules (features/): blocklist, German-requirement check, saved-job status.
-from features import access, alert_settings, broadcast, companies, keyboards, saved_status, send_filters
+from features import access, admins, alert_settings, broadcast, companies, keyboards, saved_status, send_filters
 from features import handlers as feature_handlers
 from features import schema as feature_schema
 logging.getLogger("features").addHandler(diagnostic_file_handler)
@@ -991,6 +991,9 @@ warnings.filterwarnings(
 )
 
 # Admin configuration
+# Starting admin set. At startup features/admins.py replaces its contents with
+# the `admins` table (seeded from this set once) and keeps it current when the
+# owner adds or removes an admin, so every `in ADMIN_USER_IDS` check stays live.
 ADMIN_USER_IDS = {7744296624, 510465154}  # Alwin + Aravind
 # Only the owner may send /update announcements to all users; other admins can't.
 OWNER_USER_ID = 7744296624  # Alwin
@@ -2508,6 +2511,7 @@ def admin_command(update: Update, context: CallbackContext):
         nav_row.append(InlineKeyboardButton("Next ▶️", callback_data=f"adm_upage_{ADMIN_USERS_PER_PAGE}"))
     if nav_row:
         keyboard.append(nav_row)
+    keyboard.extend(admins.panel_rows(update.effective_user.id))
     keyboard.append([InlineKeyboardButton("❌ Close", callback_data="adm_cancel")])
 
     update.message.reply_text(
@@ -2573,6 +2577,7 @@ def admin_user_list(update: Update, context: CallbackContext):
         nav_row.append(InlineKeyboardButton("Next ▶️", callback_data=f"adm_upage_{offset + ADMIN_USERS_PER_PAGE}"))
     if nav_row:
         keyboard.append(nav_row)
+    keyboard.extend(admins.panel_rows(update.effective_user.id))
     keyboard.append([InlineKeyboardButton("❌ Close", callback_data="adm_cancel")])
 
     try:
@@ -8808,11 +8813,22 @@ def main():
     )
     # Invite-only: a group -1 gate stops updates from anyone not invited;
     # admins create links with /invite (features/access.py).
+    # Owner-only admin list and invite overview (features/admins.py). Loads the
+    # admins table into ADMIN_USER_IDS, so it runs before access.register.
+    admins.register(
+        dispatcher,
+        get_conn=get_db_connection,
+        return_conn=db_pool.return_connection,
+        live_admins=ADMIN_USER_IDS,
+        owner_id=OWNER_USER_ID,
+        group=3,
+    )
     access.register(
         dispatcher,
         get_conn=get_db_connection,
         return_conn=db_pool.return_connection,
         admin_ids=ADMIN_USER_IDS,
+        owner_id=OWNER_USER_ID,
         command_group=3,
     )
     # Owner-only /update: announce a bot update to every user (features/broadcast.py).

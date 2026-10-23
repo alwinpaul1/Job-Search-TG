@@ -1,5 +1,5 @@
 """Idempotent schema changes for the feature modules, run from init_db()."""
-from features import access, alert_settings, broadcast, companies, saved_status
+from features import access, admins, alert_settings, broadcast, companies, saved_status
 
 STATEMENTS = (
     companies.SCHEMA_SQL,
@@ -7,6 +7,7 @@ STATEMENTS = (
     *alert_settings.SCHEMA_SQL,
     *saved_status.SCHEMA_SQL,
     *access.SCHEMA_SQL,
+    admins.SCHEMA_SQL,
 )
 
 

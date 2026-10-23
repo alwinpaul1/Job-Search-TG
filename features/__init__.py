@@ -10,4 +10,5 @@
     handlers            Telegram callbacks for all of the above
     broadcast           owner /update: announce a bot update to every user
     access              invite-only gate and admin /invite links
+    admins              master admin: add/remove admins, see and cancel invites
 """

@@ -48,6 +48,7 @@ New features go in `features/` as helper modules that bot.py imports and calls. 
 | `handlers` | Callbacks `bc_*`, `ams_*`, `sj_rmclosed` in dispatcher group 3 | `main()` |
 | `broadcast` | Owner-only `/update <text>` (`OWNER_USER_ID`, Alwin; other admins incl. Aravind can't): preview + ✅ Send/✖️ Cancel, then sends to every chat in `user_settings` ∪ `alerts` (~20 msg/s, background thread). Spam guards in the `broadcasts` table: Send claims a pending row once under a table lock; 24 h cooldown; identical text never sent twice. The owner gets the summary | `main()` |
 | `access` | Invite-only gate. A `TypeHandler` in dispatcher group -1 runs before every handler and stops updates from anyone who is not an admin (`ADMIN_USER_IDS`) or in `allowed_users`, with an invite-only reply that names the admins' @usernames (read from `user_settings`, so a renamed admin shows up after their next /start). Admins send `/invite` for a one-time link (`t.me/<bot>?start=inv_<code>`, 7 days, row in `invites`); opening it redeems the code atomically and /start then runs as normal, and the inviting admin gets a message. Allowed IDs are cached and reloaded every 5 min (last good list kept if the DB fails). `allowed_users` was filled once, when created, from the users already there | `main()`, admin delete-user (`revoke`) |
+| `admins` | Master-admin (owner) controls. `/admins` or 👑 Admins in `/admin`: add an admin (picked from invited users) or remove one, each with a confirm step; the owner can't be removed. 📨 Invites in `/admin`: the latest 15 invite links with status, ✖️ cancels an unused one whoever made it (`invites.cancelled_at`). Admins live in the `admins` table (seeded once from bot.py's `ADMIN_USER_IDS`); at startup and after each change the module rewrites the `ADMIN_USER_IDS` set in place, so every `in ADMIN_USER_IDS` check is live. Callbacks `own_*` (owner) and `acc_invite` (🔗 Invite someone, any admin) | `main()`, `/admin` user list (`panel_rows`) |
 | `schema` | Idempotent DDL for the above, run from `init_db()` | `init_db()` |
 
 The German setting lives in its own `alerts` column, NOT in the `filters` JSON: the edit-alert and admin filter flows rewrite `filters` wholesale.
@@ -79,7 +80,7 @@ Key sections of `bot.py` in order:
 
 PostgreSQL (`job_alerts` database, user `jobbot`). Config via `DATABASE_URL` env var or individual `POSTGRES_*` vars in `.env`.
 
-**Tables:** `alerts`, `sent_jobs`, `user_settings`, `saved_jobs`, `job_details_cache`, `blocked_companies` (from `features/companies.py`), `broadcasts` (from `features/broadcast.py`), `allowed_users` + `invites` (from `features/access.py`)
+**Tables:** `alerts`, `sent_jobs`, `user_settings`, `saved_jobs`, `job_details_cache`, `blocked_companies` (from `features/companies.py`), `broadcasts` (from `features/broadcast.py`), `allowed_users` + `invites` (from `features/access.py`), `admins` (from `features/admins.py`)
 
 **`user_settings`** also stores `first_name` and `username` (updated on every `/start`) for admin panel display. Existing users are backfilled from the Telegram API on startup.
 
@@ -104,7 +105,7 @@ The 14-day window on paths 3–4 is the compromise between blocking cross-board 
 
 ## Admin Panel
 
-Entry point: `/admin` (restricted to the `ADMIN_USER_IDS` set, hardcoded at ~line 1004). Uses a `ConversationHandler` with six states:
+Entry point: `/admin` (restricted to the `ADMIN_USER_IDS` set). The set in bot.py (~line 1004) is only the starting list: the `admins` table is the source of truth, managed by the owner through `/admins` (features/admins.py). To change admins, use that screen, not the constant. Uses a `ConversationHandler` with six states:
 
 | State | Purpose |
 |-------|---------|
@@ -125,7 +126,7 @@ Entry point: `/admin` (restricted to the `ADMIN_USER_IDS` set, hardcoded at ~lin
 
 ## Invite-only access
 
-The bot is invite-only. To add someone, an admin (Alwin or Aravind) sends `/invite` to the bot and forwards the link; it works for one person and expires after 7 days. To remove someone, use `/admin` → user → Delete user, which also revokes access. Deleting rows by hand in SQL leaves the `allowed_users` row behind: delete it too (`DELETE FROM allowed_users WHERE chat_id = …`), or the person can come back without an invite.
+The bot is invite-only. To add someone, an admin sends `/invite` (or taps 🔗 Invite someone in `/admin`) and forwards the link; it works for one person and expires after 7 days. The inviting admin and Alwin (master admin) both get a message when it's used. Alwin alone can add or remove admins and see or cancel every invite (`/admins`, or 👑 Admins / 📨 Invites in `/admin`). To remove someone, use `/admin` → user → Delete user, which also revokes access. Deleting rows by hand in SQL leaves the `allowed_users` row behind: delete it too (`DELETE FROM allowed_users WHERE chat_id = …`), or the person can come back without an invite.
 
 ## Update announcements (`/update`)
 

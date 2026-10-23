@@ -1,17 +1,23 @@
 """Invite-only access: the bot works only for admins and invited users.
 
-    /invite             admins only: a one-time link t.me/<bot>?start=inv_<code>,
-                        valid INVITE_TTL_DAYS; the inviting admin is told when it's used
-    /start inv_<code>   redeems it (opening the link sends exactly this)
+    /invite, or 🔗 Invite someone in /admin
+                        admins only: a one-time link t.me/<bot>?start=inv_<code>,
+                        valid INVITE_TTL_DAYS
+    /start inv_<code>   redeems it (opening the link sends exactly this); the
+                        inviting admin and the master admin are told
 
 A TypeHandler in dispatcher group -1 runs before every other handler and stops
 updates from anyone else (DispatcherHandlerStop) after a short invite-only
-reply that names the admins' @usernames, so people know whom to ask. Allowed IDs are cached and reloaded every RELOAD_S, so the gate makes no
-DB call per update and keeps the last good list if the database blips.
+reply that names the admins' @usernames, so people know whom to ask. Allowed
+IDs are cached and reloaded every RELOAD_S, so the gate makes no DB call per
+update and keeps the last good list if the database blips.
+
+`admin_ids` is bot.py's live ADMIN_USER_IDS set, kept by reference: features/
+admins.py updates it in place when the master admin adds or removes an admin.
 
 The users already here when this shipped were copied into allowed_users once,
 when the table was created. Deleting a user in /admin removes their access
-(revoke).
+(revoke). The master admin can cancel an unused invite (features/admins.py).
 """
 import logging
 import re
@@ -21,7 +27,7 @@ import time
 
 import telegram
 from telegram import Update
-from telegram.ext import CommandHandler, DispatcherHandlerStop, TypeHandler
+from telegram.ext import CallbackQueryHandler, CommandHandler, DispatcherHandlerStop, TypeHandler
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +42,7 @@ SCHEMA_SQL = (
         used_at TIMESTAMP
     )
     """,
+    "ALTER TABLE invites ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP",
     # Runs its body only the first time, so existing users keep access and a
     # later empty table never re-admits anyone.
     """
@@ -67,11 +74,21 @@ WELCOME_TEXT = "✅ You're in. Welcome to JobQuest!"
 _gate = None
 
 
+def person(first_name, username, fallback="Someone"):
+    """'Danny (@danny)', 'Danny', or '@danny'."""
+    if first_name and username:
+        return f"{first_name} (@{username})"
+    if username:
+        return f"@{username}"
+    return first_name or fallback
+
+
 class _Access:
-    def __init__(self, get_conn, return_conn, admin_ids):
+    def __init__(self, get_conn, return_conn, admin_ids, owner_id):
         self.get_conn = get_conn
         self.return_conn = return_conn
-        self.admin_ids = set(admin_ids)
+        self.admin_ids = admin_ids
+        self.owner_id = owner_id
         self._allowed = set()
         self._admin_usernames = []
         self._next_reload = 0.0
@@ -110,8 +127,8 @@ class _Access:
                     cur.execute(
                         """SELECT username FROM user_settings
                            WHERE chat_id = ANY(%s) AND coalesce(username, '') <> ''
-                           ORDER BY lower(username)""",
-                        (list(self.admin_ids),),
+                           ORDER BY chat_id <> %s, lower(username)""",
+                        (list(self.admin_ids), self.owner_id),
                     )
                     return [row["username"] for row in cur.fetchall()]
                 self._admin_usernames = self._db(work)
@@ -132,33 +149,45 @@ class _Access:
         self._allowed.discard(user_id)
 
     def _redeem(self, code, user):
-        """Use the invite for `user`. Returns the inviting admin's ID, or None."""
+        """Use the invite for `user`. Returns (inviter id, inviter label), or None."""
         def work(cur):
             cur.execute(
                 """UPDATE invites SET used_by = %s, used_at = NOW()
-                   WHERE code = %s AND used_by IS NULL AND expires_at > NOW()
+                   WHERE code = %s AND used_by IS NULL AND cancelled_at IS NULL
+                     AND expires_at > NOW()
                    RETURNING created_by""",
                 (user.id, code),
             )
             row = cur.fetchone()
             if not row:
                 return None
+            inviter = row["created_by"]
             cur.execute(
                 """INSERT INTO allowed_users (chat_id, invited_by) VALUES (%s, %s)
                    ON CONFLICT (chat_id) DO NOTHING""",
-                (user.id, row["created_by"]),
+                (user.id, inviter),
             )
-            return row["created_by"]
+            # Name them now so the owner's invite list shows who joined; /start
+            # (which runs next) keeps it current.
+            cur.execute(
+                """INSERT INTO user_settings (chat_id, first_name, username) VALUES (%s, %s, %s)
+                   ON CONFLICT (chat_id) DO UPDATE
+                   SET first_name = EXCLUDED.first_name, username = EXCLUDED.username""",
+                (user.id, user.first_name, user.username),
+            )
+            cur.execute("SELECT first_name, username FROM user_settings WHERE chat_id = %s", (inviter,))
+            who = cur.fetchone() or {}
+            return inviter, person(who.get("first_name"), who.get("username"), fallback=str(inviter))
 
         try:
-            inviter = self._db(work)
+            result = self._db(work)
         except Exception:
             logger.exception(f"Invite redeem failed for user {user.id}")
             return None
-        if inviter is not None:
+        if result is not None:
             self._allowed.add(user.id)
-            logger.info(f"User {user.id} joined with an invite from {inviter}")
-        return inviter
+            logger.info(f"User {user.id} joined with an invite from {result[0]}")
+        return result
 
     def gate(self, update, context):
         user = update.effective_user
@@ -168,16 +197,10 @@ class _Access:
         match = _INVITE_RE.match((message.text or "") if message else "")
         try:
             if match:
-                inviter = self._redeem(match.group(1), user)
-                if inviter is not None:
+                result = self._redeem(match.group(1), user)
+                if result is not None:
                     message.reply_text(WELCOME_TEXT)
-                    name = user.first_name or "Someone"
-                    if user.username:
-                        name += f" (@{user.username})"
-                    try:
-                        context.bot.send_message(chat_id=inviter, text=f"✅ {name} joined with your invite.")
-                    except telegram.error.TelegramError:
-                        pass
+                    self._tell_admins(context.bot, user, *result)
                     return  # let /start show the main menu
                 message.reply_text(self._text(BAD_INVITE_TEXT))
             elif update.callback_query:
@@ -188,25 +211,55 @@ class _Access:
             logger.warning(f"Invite-only reply to {user.id} failed: {e}")
         raise DispatcherHandlerStop
 
-    def invite(self, update, context):
-        user = update.effective_user
-        if user.id not in self.admin_ids:
-            return
+    def _tell_admins(self, bot, user, inviter, inviter_label):
+        name = person(user.first_name, user.username)
+        notes = {inviter: f"✅ {name} joined with your invite."}
+        if self.owner_id != inviter:
+            notes[self.owner_id] = f"✅ {name} joined with an invite from {inviter_label}."
+        for chat_id, text in notes.items():
+            try:
+                bot.send_message(chat_id=chat_id, text=text)
+            except telegram.error.TelegramError:
+                pass
+
+    def _new_invite_text(self, bot, admin_id):
         code = secrets.token_urlsafe(12)
 
         def work(cur):
             cur.execute(
                 """INSERT INTO invites (code, created_by, expires_at)
                    VALUES (%s, %s, NOW() + make_interval(days => %s))""",
-                (code, user.id, INVITE_TTL_DAYS),
+                (code, admin_id, INVITE_TTL_DAYS),
             )
         self._db(work)
-        update.message.reply_text(
+        return (
             f"🔗 Invite link for one person, valid {INVITE_TTL_DAYS} days:\n"
-            f"https://t.me/{context.bot.username}?start=inv_{code}\n\n"
-            "Send it to the person you want to invite. You'll get a message when they join.",
+            f"https://t.me/{bot.username}?start=inv_{code}\n\n"
+            "Send it to the person you want to invite. You'll get a message when they join."
+        )
+
+    def invite(self, update, context):
+        if update.effective_user.id not in self.admin_ids:
+            return
+        update.message.reply_text(
+            self._new_invite_text(context.bot, update.effective_user.id),
             disable_web_page_preview=True,
         )
+
+    def invite_button(self, update, context):
+        query = update.callback_query
+        if update.effective_user.id not in self.admin_ids:
+            query.answer()
+            return
+        text = self._new_invite_text(context.bot, update.effective_user.id)
+        query.answer("Invite link created")
+        query.message.reply_text(text, disable_web_page_preview=True)
+
+
+def refresh():
+    """Reload the cache now, e.g. after the admin list changed."""
+    if _gate is not None:
+        _gate._reload(force=True)
 
 
 def revoke(cursor, chat_id):
@@ -216,10 +269,13 @@ def revoke(cursor, chat_id):
         _gate.forget(chat_id)
 
 
-def register(dispatcher, *, get_conn, return_conn, admin_ids, command_group):
+def register(dispatcher, *, get_conn, return_conn, admin_ids, owner_id, command_group):
     global _gate
-    _gate = _Access(get_conn, return_conn, admin_ids)
+    _gate = _Access(get_conn, return_conn, admin_ids, owner_id)
     _gate._reload(force=True)
     dispatcher.add_handler(TypeHandler(Update, _gate.gate), group=-1)
     dispatcher.add_handler(CommandHandler("invite", _gate.invite), group=command_group)
+    dispatcher.add_handler(
+        CallbackQueryHandler(_gate.invite_button, pattern=r"^acc_invite$"), group=command_group
+    )
     return _gate
