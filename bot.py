@@ -169,7 +169,7 @@ diagnostic_file_handler.setFormatter(
 logger.addHandler(diagnostic_file_handler)
 
 # Feature modules (features/): blocklist, German-requirement check, saved-job status.
-from features import access, admins, alert_settings, companies, keyboards, ops_alerts, saved_status, send_filters
+from features import access, admins, alert_settings, companies, keyboards, ops_alerts, saved_status, send_filters, workplace
 from features import handlers as feature_handlers
 from features import schema as feature_schema
 logging.getLogger("features").addHandler(diagnostic_file_handler)
@@ -7910,13 +7910,15 @@ def check_single_alert(alert, bot: Bot):
             keywords=alert["keywords"],
             blocked=companies.blocked_keys(cursor, alert["chat_id"]),
             no_german=alert_settings.skips_german_jobs(alert),
+            workplaces=workplace.allowed_for(alert),
         )
 
         logger.info(
             f"Alert {alert['id']}: {len(found_jobs)} scraped, "
             f"{duped} duped, {recency_skipped} old, "
             f"{fstats['blocked']} blocked co., {fstats['off_topic']} off-topic, "
-            f"{fstats['needs_german']} need German, {fstats['closed']} closed, "
+            f"{fstats['needs_german']} need German, {fstats['wrong_place']} not remote, "
+            f"{fstats['closed']} closed, "
             f"deferred: {fstats['no_description']} no description, "
             f"{fstats['models_down']} Jev and Clef unavailable; "
             f"{fstats['by_clef']} judged by Clef (Jev down), "

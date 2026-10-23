@@ -12,7 +12,11 @@ for a hydrogen alert). Alerts with precise keywords ("AI Engineer",
 "Marketing internship") lost nothing.
 """
 
-DROP_AT = 0.7
+DROP_AT = 0.7          # Jev (owner's choice, 2026-10-23)
+# Clef's scores sit lower for the same jobs. On the same 339 labelled jobs:
+# Clef >= 0.65 dropped 46 of 75 off-topic with 1 related job (Jev >= 0.7: 40
+# and 1); at 0.7 Clef dropped only 36. So Clef, the fallback, gets its own cut-off.
+DROP_AT_CLEF = 0.65
 
 # Stored answers are keyed by this plus the keywords; bump it when the
 # question's meaning changes so old answers are not reused.
@@ -46,5 +50,12 @@ def unrelated_probability(answer):
     return float(answer["probabilities"]["unrelated"])
 
 
-def off_topic(p_unrelated):
-    return p_unrelated >= DROP_AT
+def encode(p_unrelated, model):
+    """Stored form: '0.7100' for Jev (also what older rows hold), '0.6800 clef' for Clef."""
+    return f"{p_unrelated:.4f}" + (" clef" if model == "clef" else "")
+
+
+def off_topic(stored):
+    """Apply the cut-off of the model that gave the stored answer."""
+    value, _, model = stored.partition(" ")
+    return float(value) >= (DROP_AT_CLEF if model == "clef" else DROP_AT)

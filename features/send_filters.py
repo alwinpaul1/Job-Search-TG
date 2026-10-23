@@ -6,6 +6,9 @@ answers, in one request:
 - for "I don't speak German" alerts: does the posting require German?
   (german_requirement)
 
+For alerts whose location is "Remote", the same request also asks where the
+work is done (workplace): on-site jobs are dropped unless the alert allows them.
+
 A job is judged only on its full description and sent only after a model
 has judged it (owner's rule, 2026-10-23). Jev answers; when Jev can't be
 reached the identical request goes to Cloudflare's Clef (features/clef.py).
@@ -24,7 +27,7 @@ about once, across restarts too.
 import logging
 import time
 
-from features import clef, companies, german_requirement, jev, job_fit, job_postings, ops_alerts
+from features import clef, companies, german_requirement, jev, job_fit, job_postings, ops_alerts, workplace
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +105,7 @@ def _description(job, fetch_budget):
     return posting.description, False, False
 
 
-def _read(reply, missing):
+def _read(reply, missing, model):
     """Stored values from a model's reply, or None if the reply isn't usable."""
     try:
         fresh = {}
@@ -114,11 +117,13 @@ def _read(reply, missing):
                                    german_requirement.NOT_STATED):
                     raise ValueError(f"unknown German answer {verdict!r}")
                 fresh[key] = verdict
+            elif key == workplace.CHECK_KEY:
+                fresh[key] = workplace.encode(answer)
             else:
                 p = job_fit.unrelated_probability(answer)
                 if not 0.0 <= p <= 1.0:
                     raise ValueError(f"probability {p}")
-                fresh[key] = f"{p:.4f}"
+                fresh[key] = job_fit.encode(p, model)
         return fresh
     except (KeyError, TypeError, ValueError) as e:
         logger.warning(f"Unusable model answer: {e}")
@@ -131,7 +136,7 @@ def _judge(state, missing):
     ask = {f"q{i}": q for i, q in enumerate(missing.values())}
     for name, model in (("jev", jev), ("clef", clef)):
         reply = model.ask(state, ask)
-        fresh = _read(reply, missing) if reply is not None else None
+        fresh = _read(reply, missing, name) if reply is not None else None
         if fresh is not None:
             return fresh, name
         if reply is not None:
@@ -139,9 +144,10 @@ def _judge(state, missing):
     return None, None
 
 
-def apply(jobs, *, cursor, keywords, blocked, no_german):
-    """Return (to_send, stats). `blocked` is a set of company keys."""
-    stats = {"blocked": 0, "off_topic": 0, "needs_german": 0, "closed": 0,
+def apply(jobs, *, cursor, keywords, blocked, no_german, workplaces=None):
+    """Return (to_send, stats). `blocked` is a set of company keys; `workplaces`
+    the allowed workplaces for a remote alert (workplace.allowed_for), else None."""
+    stats = {"blocked": 0, "off_topic": 0, "needs_german": 0, "wrong_place": 0, "closed": 0,
              "no_description": 0, "models_down": 0, "by_clef": 0}
     kept, stats["blocked"] = companies.drop_blocked(jobs, blocked)
     _prune(cursor)
@@ -156,6 +162,8 @@ def apply(jobs, *, cursor, keywords, blocked, no_german):
         questions = {fit_key: job_fit.QUESTION}
         if no_german:
             questions[german_requirement.CHECK_KEY] = german_requirement.QUESTION
+        if workplaces is not None:
+            questions[workplace.CHECK_KEY] = workplace.QUESTION
         answers = _stored(cursor, link, [*questions, _CLOSED_KEY])
         if _CLOSED_KEY in answers:
             stats["closed"] += 1
@@ -193,12 +201,16 @@ def apply(jobs, *, cursor, keywords, blocked, no_german):
             _store(cursor, link, fresh)
             answers.update(fresh)
 
-        if job_fit.off_topic(float(answers[fit_key])):
+        if job_fit.off_topic(answers[fit_key]):
             stats["off_topic"] += 1
             logger.info(f"Off-topic for '{keywords}' (P={answers[fit_key]}): {job.get('Title', '')[:80]}")
             continue
         if no_german and german_requirement.needs_german(answers[german_requirement.CHECK_KEY]):
             stats["needs_german"] += 1
+            continue
+        if workplaces is not None and workplace.wrong_place(answers[workplace.CHECK_KEY], workplaces):
+            stats["wrong_place"] += 1
+            logger.info(f"Not remote for '{keywords}' ({answers[workplace.CHECK_KEY]}): {job.get('Title', '')[:80]}")
             continue
         to_send.append(job)
     ops_alerts.note_unreadable(unreadable_count)
