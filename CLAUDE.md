@@ -46,7 +46,7 @@ New features go in `features/` as helper modules that bot.py imports and calls. 
 | `saved_status` | 3-hourly sweep setting `saved_jobs.closed_at`; "Remove closed" button | scheduler, Saved Jobs |
 | `keyboards` | Alert job message keyboard; Save and Block swap one button each so neither wipes the other | checker, save/unsave callbacks |
 | `handlers` | Callbacks `bc_*`, `ams_*`, `sj_rmclosed` in dispatcher group 3 | `main()` |
-| `broadcast` | Owner-only `/update <text>` (`OWNER_USER_ID`, Alwin; other admins incl. Aravind can't): preview + ✅ Send/✖️ Cancel, then sends to every chat in `user_settings` ∪ `alerts` (~20 msg/s, background thread). Spam guards in the `broadcasts` table: Send claims a pending row once under a table lock; 24 h cooldown; identical text never sent twice. The owner gets the summary | `main()` |
+| `broadcast` | Update announcements to every chat in `user_settings` ∪ `alerts` (~20 msg/s). No chat command: they are sent only from the server with `scripts/announce.py` (preview by default, `--send` to send). Spam guards in the `broadcasts` table: a send claims its row under a table lock; 24 h cooldown; identical text never sent twice. Imports no telegram code (talks to the Bot API over HTTPS) | `scripts/announce.py` |
 | `access` | Invite-only gate. A `TypeHandler` in dispatcher group -1 runs before every handler and stops updates from anyone who is not an admin (`ADMIN_USER_IDS`) or in `allowed_users`, with an invite-only reply that names the admins' @usernames (read from `user_settings`, so a renamed admin shows up after their next /start). Admins send `/invite` for a one-time link (`t.me/<bot>?start=inv_<code>`, 24 hours, row in `invites`); opening it redeems the code atomically and /start then runs as normal, and the inviting admin gets a message. Allowed IDs are cached and reloaded every 5 min (last good list kept if the DB fails). `allowed_users` was filled once, when created, from the users already there | `main()`, admin delete-user (`revoke`) |
 | `admins` | Master-admin (owner) controls. `/admins` or 👑 Admins in `/admin`: add an admin (picked from invited users) or remove one, each with a confirm step; the owner can't be removed. 📨 Invites in `/admin`: the latest 15 invite links with status, ✖️ cancels an unused one whoever made it (`invites.cancelled_at`). Admins live in the `admins` table (seeded once from bot.py's `ADMIN_USER_IDS`); at startup and after each change the module rewrites the `ADMIN_USER_IDS` set in place, so every `in ADMIN_USER_IDS` check is live. Callbacks `own_*` (owner) and `acc_invite` (🔗 Invite someone, any admin) | `main()`, `/admin` user list (`panel_rows`) |
 | `schema` | Idempotent DDL for the above, run from `init_db()` | `init_db()` |
@@ -128,16 +128,24 @@ Entry point: `/admin` (restricted to the `ADMIN_USER_IDS` set). The set in bot.p
 
 The bot is invite-only. To add someone, an admin sends `/invite` (or taps 🔗 Invite someone in `/admin`) and forwards the link; it works for one person and expires after 24 hours. When someone joins with another admin's invite, that admin and Alwin (master admin) both get a message; Alwin's own invites join silently (his call). Every join shows under 📨 Invites. Alwin alone can add or remove admins and see or cancel every invite (`/admins`, or 👑 Admins / 📨 Invites in `/admin`). To remove someone, use `/admin` → user → Delete user, which also revokes access. Deleting rows by hand in SQL leaves the `allowed_users` row behind: delete it too (`DELETE FROM allowed_users WHERE chat_id = …`), or the person can come back without an invite.
 
-## Update announcements (`/update`)
+## Update announcements
 
-When a change ships that users will notice, Alwin (the owner, `OWNER_USER_ID`; no other admin) sends `/update <text>` to the bot. It shows a preview with the recipient count, and nothing goes out until ✅ Send. The text reaches every chat in `user_settings` or `alerts`, exactly as typed, as plain text. At most one update per 24 hours, and the same text never twice, so bundle changes into one message.
+There is no `/update` command. Announcements are sent only from the server, from a Claude Code session, with `scripts/announce.py`:
+
+```bash
+cd /root/Job-Search-TG
+.venv/bin/python scripts/announce.py --file msg.txt          # preview: recipient count, exact text, whether a send is allowed now
+.venv/bin/python scripts/announce.py --file msg.txt --send   # send to every chat in user_settings ∪ alerts
+```
+
+The text goes out exactly as written, as plain text. At most one update per 24 hours, and the same text never twice, so bundle changes into one message.
 
 How to write the text:
 - Write it with the `unslop` skill. No hype, no filler.
 - Keep it short: a one-line opener, then one line per change. About 5 lines at most, readable in a few seconds on a phone.
 - Say what changed and where to find it ("My Alerts → pick an alert → 🌐 German Language"), not how it was built.
 - At most one emoji per line, used as a marker.
-- Show the draft to Alwin and get a yes; he sends it. Never send one on your own.
+- Show the draft to Alwin and get a yes before running with `--send`. Never send one on your own.
 
 ## Key Globals & Singletons
 

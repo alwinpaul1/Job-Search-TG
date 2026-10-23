@@ -169,7 +169,7 @@ diagnostic_file_handler.setFormatter(
 logger.addHandler(diagnostic_file_handler)
 
 # Feature modules (features/): blocklist, German-requirement check, saved-job status.
-from features import access, admins, alert_settings, broadcast, companies, keyboards, saved_status, send_filters
+from features import access, admins, alert_settings, companies, keyboards, saved_status, send_filters
 from features import handlers as feature_handlers
 from features import schema as feature_schema
 logging.getLogger("features").addHandler(diagnostic_file_handler)
@@ -995,7 +995,7 @@ warnings.filterwarnings(
 # the `admins` table (seeded from this set once) and keeps it current when the
 # owner adds or removes an admin, so every `in ADMIN_USER_IDS` check stays live.
 ADMIN_USER_IDS = {7744296624, 510465154}  # Alwin + Aravind
-# Only the owner may send /update announcements to all users; other admins can't.
+# The master admin: manages admins and sees every invite (features/admins.py).
 OWNER_USER_ID = 7744296624  # Alwin
 
 
@@ -8830,14 +8830,6 @@ def main():
         admin_ids=ADMIN_USER_IDS,
         owner_id=OWNER_USER_ID,
         command_group=3,
-    )
-    # Owner-only /update: announce a bot update to every user (features/broadcast.py).
-    broadcast.register(
-        dispatcher,
-        get_conn=get_db_connection,
-        return_conn=db_pool.return_connection,
-        owner_ids={OWNER_USER_ID},
-        group=3,
     )
 
     # Add admin command handlers
