@@ -5,6 +5,8 @@
                                        change has a confirm step
     📨 Invites in /admin               owner only: recent invite links and their
                                        status; ✖️ cancels an unused one, whoever made it
+    📢 Send update in /admin           owner only: how to send /update and whether
+                                       one is allowed now (features/broadcast.py)
 
 Callback data:
     own_admins / own_addlist / own_add_<id> / own_addok_<id> / own_rm_<id> / own_rmok_<id>
@@ -45,6 +47,7 @@ def panel_rows(user_id):
     if user_id == _owner:
         rows.append([InlineKeyboardButton("👑 Admins", callback_data="own_admins"),
                      InlineKeyboardButton("📨 Invites", callback_data="own_invites")])
+        rows.append([InlineKeyboardButton("📢 Send update", callback_data="bcast_help")])
     return rows
 
 
