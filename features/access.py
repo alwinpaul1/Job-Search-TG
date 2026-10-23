@@ -2,7 +2,7 @@
 
     /invite, or 🔗 Invite someone in /admin
                         admins only: a one-time link t.me/<bot>?start=inv_<code>,
-                        valid INVITE_TTL_DAYS
+                        valid INVITE_TTL_HOURS (24 h)
     /start inv_<code>   redeems it (opening the link sends exactly this); the
                         inviting admin and the master admin are told
 
@@ -60,7 +60,7 @@ SCHEMA_SQL = (
     """,
 )
 
-INVITE_TTL_DAYS = 7
+INVITE_TTL_HOURS = 24
 RELOAD_S = 300
 _RETRY_S = 30
 # Telegram deep-link payloads are [A-Za-z0-9_-], at most 64 characters.
@@ -228,12 +228,12 @@ class _Access:
         def work(cur):
             cur.execute(
                 """INSERT INTO invites (code, created_by, expires_at)
-                   VALUES (%s, %s, NOW() + make_interval(days => %s))""",
-                (code, admin_id, INVITE_TTL_DAYS),
+                   VALUES (%s, %s, NOW() + make_interval(hours => %s))""",
+                (code, admin_id, INVITE_TTL_HOURS),
             )
         self._db(work)
         return (
-            f"🔗 Invite link for one person, valid {INVITE_TTL_DAYS} days:\n"
+            f"🔗 Invite link for one person, valid {INVITE_TTL_HOURS} hours:\n"
             f"https://t.me/{bot.username}?start=inv_{code}\n\n"
             "Send it to the person you want to invite. You'll get a message when they join."
         )

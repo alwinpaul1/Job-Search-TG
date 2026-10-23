@@ -254,7 +254,7 @@ class _Owner:
             elif not r["live"]:
                 lines.append(f"⌛ expired · from {by} · {made}")
             else:
-                lines.append(f"🟢 open until {r['expires_at']:%d %b} · from {by} · {made}")
+                lines.append(f"🟢 open until {r['expires_at']:%d %b %H:%M} · from {by} · {made}")
                 buttons.append([InlineKeyboardButton(
                     f"✖️ Cancel {names[r['created_by']][:20]}'s {r['created_at']:%d %b %H:%M} link",
                     callback_data=f"own_ic_{r['code']}")])
