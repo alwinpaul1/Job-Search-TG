@@ -24,7 +24,7 @@ about once, across restarts too.
 import logging
 import time
 
-from features import clef, companies, german_requirement, jev, job_fit, job_postings
+from features import clef, companies, german_requirement, jev, job_fit, job_postings, ops_alerts
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,7 @@ MAX_FETCHES = 25
 # Answers older than this are deleted; the checker stops seeing a job long before.
 _KEEP_DAYS = 14
 _PRUNE_EVERY_S = 6 * 3600
+_MODELS_BACK = ("models", "A model answers again", ["Waiting jobs are being judged and sent."])
 # Stored for a closed LinkedIn posting, so it isn't fetched again.
 _CLOSED_KEY = "closed"
 _last_prune = [0.0]
@@ -78,23 +79,27 @@ def _prune(cursor):
 
 
 def _description(job, fetch_budget):
-    """Return (full description or None if not readable now, closed)."""
+    """Return (full description or None if not readable now, closed, unreadable).
+
+    unreadable: the page was asked for and gave no text (blocked, error page),
+    as opposed to waiting for this cycle's fetch budget."""
     if not job_postings.linkedin_job_id(job["Link"]):
         # Indeed: the scrape's text, or nothing (it can't be fetched afterwards).
-        return job.get("Description") or None, False
+        text = job.get("Description") or None
+        return text, False, text is None
     # LinkedIn: always the posting page, the full text plus open/closed, even
     # when the JobQuest fallback scrape brought some description along.
     posting = job_postings.peek(job["Link"])
     if posting is None:
         if fetch_budget[0] <= 0:
-            return None, False
+            return None, False, False
         fetch_budget[0] -= 1
         posting = job_postings.fetch(job["Link"])
     if posting.status == job_postings.CLOSED:
-        return None, True
+        return None, True, False
     if posting.status != job_postings.OPEN or not posting.description:
-        return None, False   # blocked, rate-limited or empty page: try next cycle
-    return posting.description, False
+        return None, False, True   # blocked, rate-limited or empty page: try next cycle
+    return posting.description, False, False
 
 
 def apply(jobs, *, cursor, keywords, blocked, no_german):
@@ -105,6 +110,8 @@ def apply(jobs, *, cursor, keywords, blocked, no_german):
     _prune(cursor)
 
     fit_key = job_fit.check_key(keywords)
+    unreadable_count = 0
+    models_down = False   # once Jev and Clef both failed, the rest of this alert waits too
     to_send = []
     budget = [MAX_FETCHES]
     for job in kept:
@@ -118,14 +125,18 @@ def apply(jobs, *, cursor, keywords, blocked, no_german):
             continue
         missing = {k: q for k, q in questions.items() if k not in answers}
 
+        if missing and models_down:
+            stats["models_down"] += 1
+            continue
         if missing:
-            description, closed = _description(job, budget)
+            description, closed, unreadable = _description(job, budget)
             if closed:
                 _store(cursor, link, {_CLOSED_KEY: "1"})
                 stats["closed"] += 1
                 continue
             if description is None:
                 stats["no_description"] += 1
+                unreadable_count += unreadable
                 continue
             state = {"search_keywords": keywords, "job_title": job.get("Title", ""),
                      "job_description": description}
@@ -136,8 +147,17 @@ def apply(jobs, *, cursor, keywords, blocked, no_german):
                 reply = clef.ask(state, ask)
                 if reply is None:
                     stats["models_down"] += 1
+                    models_down = True
+                    ops_alerts.problem("models", "Jev and Clef are both not answering", [
+                        "New jobs wait and are not sent unchecked; they go out once a model answers.",
+                        "Jobs that wait more than about 2 days age out of the alerts."])
                     continue
                 stats["by_clef"] += 1
+                ops_alerts.problem("jev", "Jev is not answering", [
+                    "Clef (Cloudflare) is judging the jobs instead, so alerts keep going."])
+                ops_alerts.resolved(_MODELS_BACK)
+            else:
+                ops_alerts.resolved(("jev", "Jev answers again", []), _MODELS_BACK)
             fresh = {}
             for i, key in enumerate(missing):
                 answer = reply[f"q{i}"]
@@ -156,4 +176,5 @@ def apply(jobs, *, cursor, keywords, blocked, no_german):
             stats["needs_german"] += 1
             continue
         to_send.append(job)
+    ops_alerts.note_unreadable(unreadable_count)
     return to_send, stats

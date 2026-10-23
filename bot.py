@@ -169,7 +169,7 @@ diagnostic_file_handler.setFormatter(
 logger.addHandler(diagnostic_file_handler)
 
 # Feature modules (features/): blocklist, German-requirement check, saved-job status.
-from features import access, admins, alert_settings, companies, keyboards, saved_status, send_filters
+from features import access, admins, alert_settings, companies, keyboards, ops_alerts, saved_status, send_filters
 from features import handlers as feature_handlers
 from features import schema as feature_schema
 logging.getLogger("features").addHandler(diagnostic_file_handler)
@@ -463,6 +463,13 @@ def trigger_self_restart():
     
     logger.critical("🔄 TRIGGERING SELF-RESTART...")
     logger.critical(f"📊 Crash monitor status: {crash_monitor.get_health_status()}")
+    health = crash_monitor.get_health_status()
+    last_error = crash_monitor.critical_errors[-1]["error"] if crash_monitor.critical_errors else None
+    ops_alerts.restarting_itself(
+        f"Last successful alert check {health['seconds_since_success'] / 60:.0f} min ago, "
+        f"{health['consecutive_failures']} failures in a row."
+        + (f" Last error: {last_error[:200]}" if last_error else "")
+    )
     
     try:
         # Log the restart
@@ -930,6 +937,7 @@ cpu_tracker = CPUTracker(update_interval=2.0)
 def exit_during_startup(signum, frame):
     logger.info(f"🛑 Received signal {signum} during startup, exiting")
     shutdown_requested.set()
+    ops_alerts.stopping_cleanly()
     if not scheduler_lock.acquire(timeout=20):
         logger.warning("⚠️ Alert check still running; exiting anyway")
     logging.shutdown()
@@ -997,6 +1005,7 @@ warnings.filterwarnings(
 ADMIN_USER_IDS = {7744296624, 510465154}  # Alwin + Aravind
 # The master admin: manages admins and sees every invite (features/admins.py).
 OWNER_USER_ID = 7744296624  # Alwin
+ops_alerts.setup(OWNER_USER_ID)  # bot problems are reported to the owner
 
 
 # --- Text and Link Canonicalization Functions ---
@@ -5987,6 +5996,10 @@ def _jobquest_scrape_multi_board(keyword, location, filters_dict, results_wanted
     # A blocked IP / total outage must NOT look like "no jobs today": if every
     # board hard-failed (vs. returned empty), raise so callers treat this cycle
     # as a failed check — last_checked stays put and the next cycle retries.
+    if li_failed:
+        ops_alerts.note_board_down("linkedin")
+    if ig_failed:
+        ops_alerts.note_board_down("indeed")
     if li_failed and ig_failed:
         raise RuntimeError(
             "Scrape failed on all boards (LinkedIn fast+fallback errored, "
@@ -7703,12 +7716,16 @@ def check_all_alerts(bot: Bot):
         if conn:
             db_pool.return_connection(conn)
 
+    # Problems in this round are reported to the owner at the end (ops_alerts).
+    ops_alerts.cycle_start(len(active_alerts))
+    interrupted = False
     # Process alerts one by one instead of in parallel to save memory
     for i, alert in enumerate(active_alerts):
         # On restart, stop between alerts. Carrying on into interpreter
         # shutdown made every remaining scrape fail and look like "0 jobs".
         if shutdown_requested.is_set():
             logger.info(f"🛑 Shutdown requested: stopping alert check after {i}/{len(active_alerts)} alerts")
+            interrupted = True
             break
         # A cycle takes ~20 min. Re-read the alert so one deleted or paused
         # (by its user or an admin) since the cycle started gets nothing, and
@@ -7729,10 +7746,12 @@ def check_all_alerts(bot: Bot):
             continue
         try:
             check_single_alert(alert, bot)
-        except Exception:
+        except Exception as e:
             # Log the error for the specific alert that failed
             logger.exception(f"Alert check failed for alert ID: {alert['id']}")
+            ops_alerts.note_failed(alert["id"], alert["keywords"], f"{type(e).__name__}: {e}")
 
+    ops_alerts.cycle_end(interrupted=interrupted or shutdown_requested.is_set())
     logger.info("Scheduler finished checking alerts.")
 
 
@@ -8074,9 +8093,13 @@ def check_single_alert(alert, bot: Bot):
 
     except MemoryError as e:
         logger.critical(f"Memory error checking alert {alert['id']}: {e}")
+        ops_alerts.note_failed(alert["id"], alert["keywords"], f"MemoryError: {e}")
         gc.collect()
     except Exception as e:
         logger.exception(f"Failed to check alert {alert['id']}: {e}")
+        # A restart aborts the alert in flight; that is not a problem to report.
+        if not shutdown_requested.is_set():
+            ops_alerts.note_failed(alert["id"], alert["keywords"], f"{type(e).__name__}: {e}")
     finally:
         if conn:
             try:
@@ -8987,6 +9010,7 @@ def main():
     try:
         updater.start_polling(timeout=10, read_latency=2)
         logger.info("✅ Bot is now running! Press Ctrl+C to stop.")
+        ops_alerts.started()
         crash_monitor.record_success()  # Record successful startup
         for sig in (signal.SIGINT, signal.SIGTERM):
             signal.signal(sig, on_stop_signal)
@@ -9051,6 +9075,8 @@ def main():
         # A normal return would wait at interpreter exit for every executor
         # worker, including hung scrape threads, until systemd SIGKILLs us.
         # Everything worth keeping is flushed or committed by now.
+        if stop_signal_at:
+            ops_alerts.stopping_cleanly()   # anything else is reported at the next start
         logging.shutdown()
         os._exit(0 if stop_signal_at else 1)
 

@@ -46,4 +46,4 @@ Scrapling/
 test_scrape_pipeline.py
 
 # CodeGraph local AST cache
-.codegraph/
+.codegraph/.clean_exit
