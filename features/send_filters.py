@@ -44,7 +44,7 @@ MAX_FETCHES = 25
 # Answers older than this are deleted; the checker stops seeing a job long before.
 _KEEP_DAYS = 14
 _PRUNE_EVERY_S = 6 * 3600
-_MODELS_BACK = ("models", "A model answers again", ["Waiting jobs are being judged and sent."])
+_MODELS_BACK = ("models", "Jobs are being judged again")
 # Stored for a closed LinkedIn posting, so it isn't fetched again.
 _CLOSED_KEY = "closed"
 _last_prune = [0.0]
@@ -148,16 +148,13 @@ def apply(jobs, *, cursor, keywords, blocked, no_german):
                 if reply is None:
                     stats["models_down"] += 1
                     models_down = True
-                    ops_alerts.problem("models", "Jev and Clef are both not answering", [
-                        "New jobs wait and are not sent unchecked; they go out once a model answers.",
-                        "Jobs that wait more than about 2 days age out of the alerts."])
+                    ops_alerts.problem(("models", "Jev and Clef are both down: new jobs are on hold"))
                     continue
                 stats["by_clef"] += 1
-                ops_alerts.problem("jev", "Jev is not answering", [
-                    "Clef (Cloudflare) is judging the jobs instead, so alerts keep going."])
+                ops_alerts.problem(("jev", "Jev is down: Clef is judging jobs instead"))
                 ops_alerts.resolved(_MODELS_BACK)
             else:
-                ops_alerts.resolved(("jev", "Jev answers again", []), _MODELS_BACK)
+                ops_alerts.resolved(("jev", "Jev works again"), _MODELS_BACK)
             fresh = {}
             for i, key in enumerate(missing):
                 answer = reply[f"q{i}"]

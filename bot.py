@@ -466,9 +466,8 @@ def trigger_self_restart():
     health = crash_monitor.get_health_status()
     last_error = crash_monitor.critical_errors[-1]["error"] if crash_monitor.critical_errors else None
     ops_alerts.restarting_itself(
-        f"Last successful alert check {health['seconds_since_success'] / 60:.0f} min ago, "
-        f"{health['consecutive_failures']} failures in a row."
-        + (f" Last error: {last_error[:200]}" if last_error else "")
+        f"no successful alert check for {health['seconds_since_success'] / 60:.0f} min"
+        + (f" ({last_error[:80]})" if last_error else "")
     )
     
     try:
@@ -7749,7 +7748,7 @@ def check_all_alerts(bot: Bot):
         except Exception as e:
             # Log the error for the specific alert that failed
             logger.exception(f"Alert check failed for alert ID: {alert['id']}")
-            ops_alerts.note_failed(alert["id"], alert["keywords"], f"{type(e).__name__}: {e}")
+            ops_alerts.note_failed(alert["id"], f"{type(e).__name__}: {e}")
 
     ops_alerts.cycle_end(interrupted=interrupted or shutdown_requested.is_set())
     logger.info("Scheduler finished checking alerts.")
@@ -8093,13 +8092,13 @@ def check_single_alert(alert, bot: Bot):
 
     except MemoryError as e:
         logger.critical(f"Memory error checking alert {alert['id']}: {e}")
-        ops_alerts.note_failed(alert["id"], alert["keywords"], f"MemoryError: {e}")
+        ops_alerts.note_failed(alert["id"], f"MemoryError: {e}")
         gc.collect()
     except Exception as e:
         logger.exception(f"Failed to check alert {alert['id']}: {e}")
         # A restart aborts the alert in flight; that is not a problem to report.
         if not shutdown_requested.is_set():
-            ops_alerts.note_failed(alert["id"], alert["keywords"], f"{type(e).__name__}: {e}")
+            ops_alerts.note_failed(alert["id"], f"{type(e).__name__}: {e}")
     finally:
         if conn:
             try:
