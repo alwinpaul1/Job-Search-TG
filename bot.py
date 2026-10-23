@@ -8548,10 +8548,7 @@ def main():
 
     # Persist conversation states across restarts
     persistence = PicklePersistence(filename="/root/Job-Search-TG/conversation_states.pickle")
-    # PTB's idle() owns SIGTERM/SIGINT; its user_sig_handler runs right after it
-    # stops polling, so the alert loop learns about the shutdown early.
-    updater = Updater(token, use_context=True, persistence=persistence,
-                      user_sig_handler=lambda signum, frame: shutdown_requested.set())
+    updater = Updater(token, use_context=True, persistence=persistence)
     dispatcher = updater.dispatcher
 
     def error_handler(update, context):
@@ -8984,11 +8981,23 @@ def main():
     # Start CPU tracker for accurate CPU measurements
     cpu_tracker.start()
     
+    # systemd SIGKILLs us 30 s after SIGTERM (TimeoutStopSec). PTB's own handler
+    # flushes persistence, then blocks until the current getUpdates long poll
+    # returns, so the alert loop is told first and the poll is kept short.
+    stop_signal_at = []
+
+    def on_stop_signal(signum, frame):
+        stop_signal_at.append(time.monotonic())
+        shutdown_requested.set()
+        updater._signal_handler(signum, frame)
+
     try:
-        updater.start_polling(timeout=30, read_latency=2)
+        updater.start_polling(timeout=10, read_latency=2)
         logger.info("✅ Bot is now running! Press Ctrl+C to stop.")
         crash_monitor.record_success()  # Record successful startup
-        updater.idle()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(sig, on_stop_signal)
+        updater.idle(stop_signals=())
     except MemoryError as e:
         logger.critical(f"💥 MEMORY ERROR in main polling loop: {e}")
         crash_monitor.record_failure(f"MemoryError: {e}", is_critical=True)
@@ -9015,16 +9024,17 @@ def main():
             scheduler.shutdown(wait=False)
             logger.info("✅ Scheduler shutdown complete")
 
-            # Give an in-flight alert check (it holds scheduler_lock) a few seconds to
-            # finish its current alert, inside systemd's 30 s TimeoutStopSec.
-            if scheduler_lock.acquire(timeout=15):
+            # Give an in-flight alert check (it holds scheduler_lock) until 25 s
+            # after the signal to finish its current alert.
+            elapsed = time.monotonic() - stop_signal_at[0] if stop_signal_at else 0
+            if scheduler_lock.acquire(timeout=max(0.5, min(15, 25 - elapsed))):
                 scheduler_lock.release()
                 logger.info("✅ No alert check running")
             else:
-                logger.warning("⚠️ Alert check still running after 15s; exiting anyway")
-            
-            # Shutdown thread pool
-            executor.shutdown(wait=False)
+                logger.warning("⚠️ Alert check still running; exiting anyway")
+
+            # Shutdown thread pool; queued tasks are dropped, not run
+            executor.shutdown(wait=False, cancel_futures=True)
             logger.info("✅ Thread pool shutdown complete")
             
             # Stop CPU tracker
@@ -9045,6 +9055,11 @@ def main():
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
         logger.info("🛑 Bot shutdown complete.")
+        # A normal return would wait at interpreter exit for every executor
+        # worker, including hung scrape threads, until systemd SIGKILLs us.
+        # Everything worth keeping is flushed or committed by now.
+        logging.shutdown()
+        os._exit(0 if stop_signal_at else 1)
 
 
 if __name__ == "__main__":
