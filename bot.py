@@ -169,7 +169,7 @@ diagnostic_file_handler.setFormatter(
 logger.addHandler(diagnostic_file_handler)
 
 # Feature modules (features/): blocklist, German-requirement check, saved-job status.
-from features import alert_settings, companies, keyboards, saved_status, send_filters
+from features import alert_settings, broadcast, companies, keyboards, saved_status, send_filters
 from features import handlers as feature_handlers
 from features import schema as feature_schema
 logging.getLogger("features").addHandler(diagnostic_file_handler)
@@ -8818,6 +8818,14 @@ def main():
         return_conn=db_pool.return_connection,
         preferences_menu=preferences_menu,
         saved_jobs_menu=saved_jobs_menu,
+        group=3,
+    )
+    # Admin /update: announce a bot update to every user (features/broadcast.py).
+    broadcast.register(
+        dispatcher,
+        get_conn=get_db_connection,
+        return_conn=db_pool.return_connection,
+        admin_ids=ADMIN_USER_IDS,
         group=3,
     )
 

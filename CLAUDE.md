@@ -46,6 +46,7 @@ New features go in `features/` as helper modules that bot.py imports and calls. 
 | `saved_status` | 3-hourly sweep setting `saved_jobs.closed_at`; "Remove closed" button | scheduler, Saved Jobs |
 | `keyboards` | Alert job message keyboard; Save and Block swap one button each so neither wipes the other | checker, save/unsave callbacks |
 | `handlers` | Callbacks `bc_*`, `ams_*`, `sj_rmclosed` in dispatcher group 3 | `main()` |
+| `broadcast` | Admin `/update <text>`: preview + ✅ Send/✖️ Cancel, then sends to every chat in `user_settings` ∪ `alerts` (~20 msg/s, background thread), reports sent/blocked/failed | `main()` |
 | `schema` | Idempotent DDL for the above, run from `init_db()` | `init_db()` |
 
 The German setting lives in its own `alerts` column, NOT in the `filters` JSON: the edit-alert and admin filter flows rewrite `filters` wholesale.
@@ -120,6 +121,17 @@ Entry point: `/admin` (restricted to the `ADMIN_USER_IDS` set, hardcoded at ~lin
 **Delete user flow:** `admin_delete_user_start` → confirmation → `admin_delete_user_confirm` deletes `saved_jobs`, `alerts` (cascades to `sent_jobs`/`job_details_cache`), and `user_settings`.
 
 **Stale callback fallback** (~line 8700): A standalone `CallbackQueryHandler` (pattern `^adm_`) in group 2 catches admin button presses that arrive after a bot restart (when `ConversationHandler` state is lost) and re-routes them. Edit flows (`adm_editkw_/editloc_/editflt_/flt_*`) can't work without live conversation state, so the fallback answers "session expired, run /admin". Similar stale fallbacks exist in group 0 for My-Alerts buttons and saved-jobs buttons (🗑️/Prev/Next).
+
+## Update announcements (`/update`)
+
+When a change ships that users will notice, an admin sends `/update <text>` to the bot. It shows a preview with the recipient count, and nothing goes out until ✅ Send. The text reaches every chat in `user_settings` or `alerts`, exactly as typed, as plain text.
+
+How to write the text:
+- Write it with the `unslop` skill. No hype, no filler.
+- Keep it short: a one-line opener, then one line per change. About 5 lines at most, readable in a few seconds on a phone.
+- Say what changed and where to find it ("My Alerts → pick an alert → 🌐 German Language"), not how it was built.
+- At most one emoji per line, used as a marker.
+- Show the draft to Alwin and get a yes before sending. Never send one on your own.
 
 ## Key Globals & Singletons
 
