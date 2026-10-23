@@ -146,7 +146,7 @@ How to write the text:
 - Format it (Alwin, 2026-10-23): a bold title, then one block per change with a bold heading and a short line under it, two empty lines between blocks (the script enforces this: any blank-line gap in the file becomes exactly two). Escape `&`, `<`, `>` as `&amp;` `&lt;` `&gt;`. Shape:
 
   ```
-  📢 <b>JobQuest update</b>
+  📢 <b>JobQuest Update</b>
 
   🚫 <b>Block a company</b>
   Tap Block company under any job alert. Undo it in Preferences → Blocked Companies.
