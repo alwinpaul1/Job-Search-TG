@@ -5757,10 +5757,10 @@ def _jobquest_df_to_bot_jobs(df):
         dp_str = _format_relative_posted(dp)
         if not link or not title:
             continue
-        # Kept for the alert language filter (features/send_filters.py); the
-        # first 3000 chars are plenty to tell English from German.
+        # The full text: features/send_filters.py has Jev judge each job on its
+        # whole description (topic and German), and Indeed can't be re-fetched.
         desc = row.get("description")
-        desc_str = str(desc)[:3000] if desc is not None and str(desc) != "nan" else ""
+        desc_str = str(desc) if desc is not None and str(desc) != "nan" else ""
         jobs.append({
             "Title": title, "Company": company,
             "Location": loc_str, "Date Posted": dp_str, "Link": link,
@@ -7880,11 +7880,14 @@ def check_single_alert(alert, bot: Bot):
         except Exception:
             pass
 
-        # Per-user filters: blocked companies, then for "I don't speak German"
-        # alerts a Jev check per job (may fetch LinkedIn postings, which also
-        # drops closed jobs).
+        # Per-user filters: blocked companies, then Jev reads each job's full
+        # description: off-topic for the keywords, and German required for
+        # "I don't speak German" alerts. A job whose description or verdict
+        # isn't available yet is deferred to the next cycle, never sent unchecked.
         jobs_to_send, fstats = send_filters.apply(
             jobs_to_send,
+            cursor=cursor,
+            keywords=alert["keywords"],
             blocked=companies.blocked_keys(cursor, alert["chat_id"]),
             no_german=alert_settings.skips_german_jobs(alert),
         )
@@ -7892,9 +7895,10 @@ def check_single_alert(alert, bot: Bot):
         logger.info(
             f"Alert {alert['id']}: {len(found_jobs)} scraped, "
             f"{duped} duped, {recency_skipped} old, "
-            f"{fstats['blocked']} blocked co., {fstats['needs_german']} need German "
-            f"({fstats['unchecked']} unchecked: Jev unavailable), "
-            f"{fstats['closed']} closed, {fstats['deferred']} deferred, "
+            f"{fstats['blocked']} blocked co., {fstats['off_topic']} off-topic, "
+            f"{fstats['needs_german']} need German, {fstats['closed']} closed, "
+            f"deferred: {fstats['no_description']} no description, "
+            f"{fstats['jev_down']} Jev unavailable, "
             f"{len(jobs_to_send)} to send"
         )
 

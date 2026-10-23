@@ -39,10 +39,12 @@ New features go in `features/` as helper modules that bot.py imports and calls. 
 | Module | What it does | Called from |
 |--------|--------------|-------------|
 | `companies` | Per-chat company blocklist, `company_key()` normalization (drops accents and legal suffixes, exact match only) | checker, live search, handlers, admin delete-user |
-| `german_requirement` | Asks TypeSafe's Jev (pinned `jev-1.14.0`, HTTP, ~1,500 input tokens/job) whether a job needs German: required / optional / not_stated. Needs `TYPESAFE_API_KEY` in `.env`. Policy: skip ONLY when the posting states German is required; not_stated (any ad language) and optional are sent; Jev unavailable = send | `send_filters` |
+| `jev` | TypeSafe's Jev over HTTP (pinned `jev-1.14.0`), several questions per request; billed on input tokens only. Needs `TYPESAFE_API_KEY` in `.env` | `send_filters` |
+| `job_fit` | The Jev question "is this job about the alert's keywords?" (match / related / unrelated). Drop when P(unrelated) ≥ 0.7. Tested 2026-10-23 on 339 real jobs from every alert: dropped 40 of 75 off-topic, 1 related; precise-keyword alerts lost nothing | `send_filters` |
+| `german_requirement` | The Jev question "does the posting require German?": required / optional / not_stated. Skip ONLY when the posting states German is required; not_stated (any ad language) and optional are sent | `send_filters` |
 | `job_postings` | LinkedIn guest `jobPosting/<id>` fetch → open/closed + description; shared 1.5 s rate limit, 6 h cache | `send_filters`, `saved_status` |
 | `alert_settings` | `alerts.match_language` column: `any` or `nogerman` ("I don't speak German") | checker, alert details |
-| `send_filters` | Pre-send step in the checker: blocklist, then for `nogerman` alerts the Jev check (fetches ≤25 LinkedIn postings per alert per cycle for descriptions, defers the rest, drops closed ones) | `check_single_alert` |
+| `send_filters` | Pre-send step in the checker: blocklist, then ONE Jev request per job on the FULL description: topic check for every alert, German check for `nogerman` alerts. **No fallback** (Alwin, 2026-10-23): no description, or Jev unreachable → the job is deferred (not sent, not recorded, retried next cycle), never judged on its title and never sent unchecked. LinkedIn text always comes from the posting page (≤25 fetches per alert per cycle; closed jobs dropped); Indeed text is the scrape's full `Description` (never truncated: Indeed can't be fetched later). Answers and closed status are stored in `job_checks` (pruned after 14 days), so a job is fetched and judged once, across restarts | `check_single_alert` |
 | `saved_status` | 3-hourly sweep setting `saved_jobs.closed_at`; "Remove closed" button | scheduler, Saved Jobs |
 | `keyboards` | Alert job message keyboard; Save and Block swap one button each so neither wipes the other | checker, save/unsave callbacks |
 | `handlers` | Callbacks `bc_*`, `ams_*`, `sj_rmclosed` in dispatcher group 3 | `main()` |
@@ -80,7 +82,7 @@ Key sections of `bot.py` in order:
 
 PostgreSQL (`job_alerts` database, user `jobbot`). Config via `DATABASE_URL` env var or individual `POSTGRES_*` vars in `.env`.
 
-**Tables:** `alerts`, `sent_jobs`, `user_settings`, `saved_jobs`, `job_details_cache`, `blocked_companies` (from `features/companies.py`), `broadcasts` (from `features/broadcast.py`), `allowed_users` + `invites` (from `features/access.py`), `admins` (from `features/admins.py`)
+**Tables:** `alerts`, `sent_jobs`, `user_settings`, `saved_jobs`, `job_details_cache`, `blocked_companies` (from `features/companies.py`), `broadcasts` (from `features/broadcast.py`), `allowed_users` + `invites` (from `features/access.py`), `admins` (from `features/admins.py`), `job_checks` (from `features/send_filters.py`)
 
 **`user_settings`** also stores `first_name` and `username` (updated on every `/start`) for admin panel display. Existing users are backfilled from the Telegram API on startup.
 
