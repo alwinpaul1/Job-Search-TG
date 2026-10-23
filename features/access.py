@@ -6,7 +6,7 @@
 
 A TypeHandler in dispatcher group -1 runs before every other handler and stops
 updates from anyone else (DispatcherHandlerStop) after a short invite-only
-reply. Allowed IDs are cached and reloaded every RELOAD_S, so the gate makes no
+reply that names the admins' @usernames, so people know whom to ask. Allowed IDs are cached and reloaded every RELOAD_S, so the gate makes no
 DB call per update and keeps the last good list if the database blips.
 
 The users already here when this shipped were copied into allowed_users once,
@@ -59,8 +59,9 @@ _RETRY_S = 30
 # Telegram deep-link payloads are [A-Za-z0-9_-], at most 64 characters.
 _INVITE_RE = re.compile(r"^/start(?:@\w+)?\s+inv_([A-Za-z0-9_-]{8,60})\s*$")
 
-LOCKED_TEXT = "🔒 JobQuest is invite-only. Ask an admin for an invite link."
-BAD_INVITE_TEXT = "This invite link has expired or was already used. Ask an admin for a new one."
+# {ask} becomes "Ask @admin1 or @admin2" (admins' usernames from user_settings).
+LOCKED_TEXT = "🔒 JobQuest is invite-only. {ask} for an invite link."
+BAD_INVITE_TEXT = "This invite link has expired or was already used. {ask} for a new one."
 WELCOME_TEXT = "✅ You're in. Welcome to JobQuest!"
 
 _gate = None
@@ -72,6 +73,7 @@ class _Access:
         self.return_conn = return_conn
         self.admin_ids = set(admin_ids)
         self._allowed = set()
+        self._admin_usernames = []
         self._next_reload = 0.0
         self._lock = threading.Lock()
 
@@ -102,12 +104,29 @@ class _Access:
             except Exception as e:
                 self._next_reload = time.monotonic() + _RETRY_S
                 logger.warning(f"Could not reload allowed users, keeping {len(self._allowed)}: {e}")
+            # Only for the invite-only text, so a failure here never blocks access.
+            try:
+                def work(cur):
+                    cur.execute(
+                        """SELECT username FROM user_settings
+                           WHERE chat_id = ANY(%s) AND coalesce(username, '') <> ''
+                           ORDER BY lower(username)""",
+                        (list(self.admin_ids),),
+                    )
+                    return [row["username"] for row in cur.fetchall()]
+                self._admin_usernames = self._db(work)
+            except Exception as e:
+                logger.warning(f"Could not load admin usernames: {e}")
 
     def is_allowed(self, user_id):
         if user_id in self.admin_ids:
             return True
         self._reload()
         return user_id in self._allowed
+
+    def _text(self, template):
+        names = " or ".join(f"@{u}" for u in self._admin_usernames)
+        return template.format(ask=f"Ask {names}" if names else "Ask an admin")
 
     def forget(self, user_id):
         self._allowed.discard(user_id)
@@ -160,11 +179,11 @@ class _Access:
                     except telegram.error.TelegramError:
                         pass
                     return  # let /start show the main menu
-                message.reply_text(BAD_INVITE_TEXT)
+                message.reply_text(self._text(BAD_INVITE_TEXT))
             elif update.callback_query:
-                update.callback_query.answer(LOCKED_TEXT, show_alert=True)
+                update.callback_query.answer(self._text(LOCKED_TEXT), show_alert=True)
             elif message and update.effective_chat and update.effective_chat.type == "private":
-                message.reply_text(LOCKED_TEXT)
+                message.reply_text(self._text(LOCKED_TEXT))
         except telegram.error.TelegramError as e:
             logger.warning(f"Invite-only reply to {user.id} failed: {e}")
         raise DispatcherHandlerStop
