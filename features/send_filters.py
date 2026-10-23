@@ -102,6 +102,43 @@ def _description(job, fetch_budget):
     return posting.description, False, False
 
 
+def _read(reply, missing):
+    """Stored values from a model's reply, or None if the reply isn't usable."""
+    try:
+        fresh = {}
+        for i, key in enumerate(missing):
+            answer = reply[f"q{i}"]
+            if key == german_requirement.CHECK_KEY:
+                verdict = german_requirement.verdict(answer)
+                if verdict not in (german_requirement.REQUIRED, german_requirement.OPTIONAL,
+                                   german_requirement.NOT_STATED):
+                    raise ValueError(f"unknown German answer {verdict!r}")
+                fresh[key] = verdict
+            else:
+                p = job_fit.unrelated_probability(answer)
+                if not 0.0 <= p <= 1.0:
+                    raise ValueError(f"probability {p}")
+                fresh[key] = f"{p:.4f}"
+        return fresh
+    except (KeyError, TypeError, ValueError) as e:
+        logger.warning(f"Unusable model answer: {e}")
+        return None
+
+
+def _judge(state, missing):
+    """Ask Jev, else Clef. Returns (stored values, "jev" | "clef"), or (None, None)."""
+    # Question names are only for code; the models never see them.
+    ask = {f"q{i}": q for i, q in enumerate(missing.values())}
+    for name, model in (("jev", jev), ("clef", clef)):
+        reply = model.ask(state, ask)
+        fresh = _read(reply, missing) if reply is not None else None
+        if fresh is not None:
+            return fresh, name
+        if reply is not None:
+            model.last_error = "unusable answer"
+    return None, None
+
+
 def apply(jobs, *, cursor, keywords, blocked, no_german):
     """Return (to_send, stats). `blocked` is a set of company keys."""
     stats = {"blocked": 0, "off_topic": 0, "needs_german": 0, "closed": 0,
@@ -140,28 +177,19 @@ def apply(jobs, *, cursor, keywords, blocked, no_german):
                 continue
             state = {"search_keywords": keywords, "job_title": job.get("Title", ""),
                      "job_description": description}
-            # Question names are only for code; Jev never sees them.
-            ask = {f"q{i}": q for i, q in enumerate(missing.values())}
-            reply = jev.ask(state, ask)
-            if reply is None:
-                reply = clef.ask(state, ask)
-                if reply is None:
-                    stats["models_down"] += 1
-                    models_down = True
-                    ops_alerts.problem(("models", "Jev and Clef are both down: new jobs are on hold"))
-                    continue
+            fresh, model = _judge(state, missing)
+            if fresh is None:
+                stats["models_down"] += 1
+                models_down = True
+                ops_alerts.problem(("models", f"Jev and Clef are both down (Jev: {jev.last_error}, "
+                                              f"Clef: {clef.last_error}): new jobs are on hold"))
+                continue
+            if model == "clef":
                 stats["by_clef"] += 1
-                ops_alerts.problem(("jev", "Jev is down: Clef is judging jobs instead"))
+                ops_alerts.problem(("jev", f"Jev is down ({jev.last_error}): Clef is judging jobs instead"))
                 ops_alerts.resolved(_MODELS_BACK)
             else:
                 ops_alerts.resolved(("jev", "Jev works again"), _MODELS_BACK)
-            fresh = {}
-            for i, key in enumerate(missing):
-                answer = reply[f"q{i}"]
-                if key == german_requirement.CHECK_KEY:
-                    fresh[key] = german_requirement.verdict(answer)
-                else:
-                    fresh[key] = f"{job_fit.unrelated_probability(answer):.4f}"
             _store(cursor, link, fresh)
             answers.update(fresh)
 

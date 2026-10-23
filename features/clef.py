@@ -21,6 +21,9 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+# Why the last ask() returned None, in a few words, for the admin report.
+last_error = ""
+
 MODEL = "clef"
 _URL = "https://api.cloudflare.com/client/v4/accounts/{account}/ai/run/@cf/cloudflare/" + MODEL
 
@@ -30,10 +33,16 @@ def _config():
             os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip())
 
 
+def _fail(reason):
+    global last_error
+    last_error = reason
+
+
 def ask(state, questions):
     """Return {question name: answer}, or None if Clef can't be asked right now."""
     token, account = _config()
     if not token or not account:
+        _fail("no API token set")
         return None
     body = {"model": MODEL, "state": state, "questions": questions}
     for attempt in range(3):
@@ -44,17 +53,21 @@ def ask(state, questions):
             )
         except requests.RequestException as e:
             logger.warning(f"Clef request failed: {e}")
+            _fail("not reachable")
             return None
         if resp.status_code in (429, 500, 502, 503, 504):
             time.sleep(2 ** attempt + 1)
             continue
         if resp.status_code != 200:
             logger.warning(f"Clef answered {resp.status_code}: {resp.text[:200]}")
+            _fail("API key rejected" if resp.status_code in (401, 403) else f"HTTP {resp.status_code}")
             return None
         try:
             return resp.json()["result"]["answers"]
         except (ValueError, KeyError, TypeError) as e:
             logger.warning(f"Clef reply unreadable: {e}")
+            _fail("unreadable reply")
             return None
     logger.warning("Clef busy three times in a row")
+    _fail("busy")
     return None
