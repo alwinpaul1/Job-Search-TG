@@ -19,9 +19,10 @@ judging), Jev and Clef both down, the database not reachable, the bot
 restarting itself, and a start after an unclean stop (crash, out-of-memory kill).
 
 What the bot can't report itself (the server, the bot process or its network
-down; rounds that stop finishing) is caught outside: beat() pings a Cloudflare
-Worker every 5 min (watchdog/ in this repo), which messages the owner when the
-pings stop for 30 min or no round has finished for 2 h. Not reported, because the bot handles them:
+down; rounds that stop finishing) needs an outside check: beat() pings the
+Cloudflare Worker in watchdog/ every 5 min, which messages the owner when the
+pings stop for 30 min or no round has finished for 2 h. Not deployed at the
+moment (see CLAUDE.md); without WATCHDOG_URL the ping is skipped. Not reported, because the bot handles them:
 single LinkedIn 429s, memory clean-ups, planned restarts.
 
 Messages go straight to the Bot API over HTTPS, so they work from any thread

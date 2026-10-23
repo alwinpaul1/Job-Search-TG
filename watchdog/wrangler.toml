@@ -4,7 +4,7 @@ name = "jobquest-watchdog"
 main = "src/index.js"
 compatibility_date = "2026-10-01"
 workers_dev = true
-account_id = "bd5f342142b6410e1438260214d9990b"   # Alwin@nexdash.com
+account_id = "ACCOUNT_ID"   # NOT the nexdash account (Alwin, 2026-10-23)
 
 [vars]
 OWNER_CHAT_ID = "7744296624"   # Alwin, the master admin
@@ -14,4 +14,4 @@ crons = ["*/10 * * * *"]
 
 [[kv_namespaces]]
 binding = "STATE"
-id = "e0a6fa36dd6b4b869a4a0b015f890d3e"
+id = "KV_NAMESPACE_ID"   # wrangler kv namespace create jobquest-watchdog-state
