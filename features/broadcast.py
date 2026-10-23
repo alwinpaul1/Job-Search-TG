@@ -1,15 +1,16 @@
-"""Admin /update: announce a bot update to every user, without spamming them.
+"""Owner-only /update: announce a bot update to every user, without spamming them.
 
-    /update <text>   admin only; saves a pending update and shows a preview
+    /update <text>   owner only (OWNER_USER_ID in bot.py; other admins can't);
+                     saves a pending update and shows a preview
     ✅ Send / ✖️ Cancel buttons (callbacks bcast_send_<id> / bcast_cancel_<id>)
 
-Spam guards, enforced in the database so they hold across both admins,
-double taps and restarts:
+Spam guards, enforced in the database so they hold across double taps,
+restarts and any future second sender:
 - each preview is a `broadcasts` row; Send claims it once (pending -> sending)
-  under a table lock, so two taps or two admins can't both send it;
+  under a table lock, so repeated or simultaneous taps send it once;
 - after any update goes out, no other one is allowed for COOLDOWN_HOURS;
 - the exact same text is never sent twice.
-Every admin is told when an update goes out.
+The owner gets a sent / blocked / failed summary when it finishes.
 
 The text goes out exactly as typed, as plain text. Recipients: every chat in
 user_settings or alerts, at ~20 messages/second in a background thread.
@@ -70,7 +71,7 @@ def refusal(cursor, text, exclude_id=None):
     if row:
         ago = float(row["hours_ago"])
         wait = COOLDOWN_HOURS - ago
-        who = row["admin_name"] or "An admin"
+        who = row["admin_name"] or "Someone"
         return (f"{who} sent an update {ago:.0f} h ago. To avoid spamming users, "
                 f"the next one is allowed in {wait:.0f} h.")
     cursor.execute(
@@ -108,10 +109,10 @@ def send_all(bot, chat_ids, text, gap_s=_SEND_GAP_S):
 
 
 class _Handlers:
-    def __init__(self, get_conn, return_conn, admin_ids):
+    def __init__(self, get_conn, return_conn, owner_ids):
         self.get_conn = get_conn
         self.return_conn = return_conn
-        self.admin_ids = admin_ids
+        self.owner_ids = owner_ids
 
     def _db(self, fn):
         conn = self.get_conn()
@@ -127,7 +128,7 @@ class _Handlers:
 
     def command(self, update, context):
         user = update.effective_user
-        if user.id not in self.admin_ids:
+        if user.id not in self.owner_ids:
             return
         # Everything after "/update" (space or newline), line breaks kept.
         parts = (update.message.text or "").split(None, 1)
@@ -168,13 +169,13 @@ class _Handlers:
     def confirm(self, update, context):
         query = update.callback_query
         user = update.effective_user
-        if user.id not in self.admin_ids:
+        if user.id not in self.owner_ids:
             query.answer()
             return
         action, bid = context.match.group(1), int(context.match.group(2))
 
         def work(cur):
-            # One claim at a time across all admins and dispatcher threads.
+            # One claim at a time across dispatcher threads and repeated taps.
             cur.execute("LOCK TABLE broadcasts IN SHARE ROW EXCLUSIVE MODE")
             cur.execute("SELECT status, text FROM broadcasts WHERE id = %s", (bid,))
             row = cur.fetchone()
@@ -211,7 +212,7 @@ class _Handlers:
         text = info
         query.answer(f"Sending to {len(chat_ids)} users…")
         bot = context.bot
-        sender = user.first_name or "An admin"
+        sender = user.first_name or "The owner"
 
         def run():
             sent, blocked, failed = send_all(bot, chat_ids, text)
@@ -226,17 +227,17 @@ class _Handlers:
             summary = (f"📢 {sender} sent an update to {sent} users. "
                        f"Blocked the bot: {blocked}. Failed: {failed}.\n"
                        f"Next update allowed in {COOLDOWN_HOURS} h.")
-            for admin_id in self.admin_ids:
+            for owner_id in self.owner_ids:
                 try:
-                    bot.send_message(chat_id=admin_id, text=summary)
+                    bot.send_message(chat_id=owner_id, text=summary)
                 except telegram.error.TelegramError:
                     pass
 
         threading.Thread(target=run, name="update-broadcast", daemon=True).start()
 
 
-def register(dispatcher, *, get_conn, return_conn, admin_ids, group):
-    h = _Handlers(get_conn, return_conn, admin_ids)
+def register(dispatcher, *, get_conn, return_conn, owner_ids, group):
+    h = _Handlers(get_conn, return_conn, owner_ids)
     dispatcher.add_handler(CommandHandler("update", h.command), group=group)
     dispatcher.add_handler(
         CallbackQueryHandler(h.confirm, pattern=r"^bcast_(send|cancel)_(\d+)$"), group=group

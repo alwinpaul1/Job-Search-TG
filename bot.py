@@ -1002,6 +1002,8 @@ warnings.filterwarnings(
 
 # Admin configuration
 ADMIN_USER_IDS = {7744296624, 510465154}  # Alwin + Aravind
+# Only the owner may send /update announcements to all users; other admins can't.
+OWNER_USER_ID = 7744296624  # Alwin
 
 
 # --- Text and Link Canonicalization Functions ---
@@ -5966,6 +5968,10 @@ def _jobquest_scrape_multi_board(keyword, location, filters_dict, results_wanted
             ig_failed = True
     except Exception as e:
         logger.error(f"Multi-board scrape failed: {e}", exc_info=True)
+        # The scrapes never ran (e.g. "cannot schedule new futures after
+        # interpreter shutdown"): count both boards as failed so the caller
+        # raises below instead of recording an empty result.
+        ig_failed = True
     finally:
         exe.shutdown(wait=False)
 
@@ -6067,6 +6073,10 @@ def scrape_linkedin_with_adaptive_jobbert(
     if not all_scraped_jobs:
         logger.info(f"🔍 [STAGE] SCRAPE_END_NO_JOBS | elapsed={time.time()-function_start:.2f}s")
         return []
+
+    if shutdown_requested.is_set():
+        # Fail rather than load JobBERT on the way out; the alert is retried next run.
+        raise RuntimeError("Shutting down: skipping AI filtering")
 
     if progress_msg:
         loading_chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
@@ -7698,7 +7708,12 @@ def check_all_alerts(bot: Bot):
             db_pool.return_connection(conn)
 
     # Process alerts one by one instead of in parallel to save memory
-    for alert in active_alerts:
+    for i, alert in enumerate(active_alerts):
+        # On restart, stop between alerts. Carrying on into interpreter
+        # shutdown made every remaining scrape fail and look like "0 jobs".
+        if shutdown_requested.is_set():
+            logger.info(f"🛑 Shutdown requested: stopping alert check after {i}/{len(active_alerts)} alerts")
+            break
         try:
             check_single_alert(alert, bot)
         except Exception:
@@ -8130,6 +8145,7 @@ def main():
 
     def signal_handler(signum, frame):
         logger.info(f"Received signal {signum}, shutting down gracefully...")
+        shutdown_requested.set()
         
         # Shutdown scheduler
         if 'scheduler' in locals():
@@ -8142,7 +8158,7 @@ def main():
         # Shutdown thread pool
         if 'executor' in globals():
             try:
-                executor.shutdown(wait=True, timeout=30)
+                executor.shutdown(wait=False)
                 logger.info("✅ Thread pool shutdown complete")
             except Exception as e:
                 logger.error(f"Error shutting down thread pool: {e}")
@@ -8532,7 +8548,10 @@ def main():
 
     # Persist conversation states across restarts
     persistence = PicklePersistence(filename="/root/Job-Search-TG/conversation_states.pickle")
-    updater = Updater(token, use_context=True, persistence=persistence)
+    # PTB's idle() owns SIGTERM/SIGINT; its user_sig_handler runs right after it
+    # stops polling, so the alert loop learns about the shutdown early.
+    updater = Updater(token, use_context=True, persistence=persistence,
+                      user_sig_handler=lambda signum, frame: shutdown_requested.set())
     dispatcher = updater.dispatcher
 
     def error_handler(update, context):
@@ -8820,12 +8839,12 @@ def main():
         saved_jobs_menu=saved_jobs_menu,
         group=3,
     )
-    # Admin /update: announce a bot update to every user (features/broadcast.py).
+    # Owner-only /update: announce a bot update to every user (features/broadcast.py).
     broadcast.register(
         dispatcher,
         get_conn=get_db_connection,
         return_conn=db_pool.return_connection,
-        admin_ids=ADMIN_USER_IDS,
+        owner_ids={OWNER_USER_ID},
         group=3,
     )
 
@@ -8995,6 +9014,14 @@ def main():
             # Shutdown scheduler
             scheduler.shutdown(wait=False)
             logger.info("✅ Scheduler shutdown complete")
+
+            # Give an in-flight alert check (it holds scheduler_lock) a few seconds to
+            # finish its current alert, inside systemd's 30 s TimeoutStopSec.
+            if scheduler_lock.acquire(timeout=15):
+                scheduler_lock.release()
+                logger.info("✅ No alert check running")
+            else:
+                logger.warning("⚠️ Alert check still running after 15s; exiting anyway")
             
             # Shutdown thread pool
             executor.shutdown(wait=False)

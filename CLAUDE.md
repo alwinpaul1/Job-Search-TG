@@ -46,7 +46,7 @@ New features go in `features/` as helper modules that bot.py imports and calls. 
 | `saved_status` | 3-hourly sweep setting `saved_jobs.closed_at`; "Remove closed" button | scheduler, Saved Jobs |
 | `keyboards` | Alert job message keyboard; Save and Block swap one button each so neither wipes the other | checker, save/unsave callbacks |
 | `handlers` | Callbacks `bc_*`, `ams_*`, `sj_rmclosed` in dispatcher group 3 | `main()` |
-| `broadcast` | Admin `/update <text>`: preview + ✅ Send/✖️ Cancel, then sends to every chat in `user_settings` ∪ `alerts` (~20 msg/s, background thread). Spam guards in the `broadcasts` table: Send claims a pending row once under a table lock; 24 h cooldown across all admins; identical text never sent twice. Every admin gets the summary | `main()` |
+| `broadcast` | Owner-only `/update <text>` (`OWNER_USER_ID`, Alwin; other admins incl. Aravind can't): preview + ✅ Send/✖️ Cancel, then sends to every chat in `user_settings` ∪ `alerts` (~20 msg/s, background thread). Spam guards in the `broadcasts` table: Send claims a pending row once under a table lock; 24 h cooldown; identical text never sent twice. The owner gets the summary | `main()` |
 | `schema` | Idempotent DDL for the above, run from `init_db()` | `init_db()` |
 
 The German setting lives in its own `alerts` column, NOT in the `filters` JSON: the edit-alert and admin filter flows rewrite `filters` wholesale.
@@ -124,14 +124,14 @@ Entry point: `/admin` (restricted to the `ADMIN_USER_IDS` set, hardcoded at ~lin
 
 ## Update announcements (`/update`)
 
-When a change ships that users will notice, an admin sends `/update <text>` to the bot. It shows a preview with the recipient count, and nothing goes out until ✅ Send. The text reaches every chat in `user_settings` or `alerts`, exactly as typed, as plain text. At most one update per 24 hours across both admins, and the same text never twice, so bundle changes into one message.
+When a change ships that users will notice, Alwin (the owner, `OWNER_USER_ID`; no other admin) sends `/update <text>` to the bot. It shows a preview with the recipient count, and nothing goes out until ✅ Send. The text reaches every chat in `user_settings` or `alerts`, exactly as typed, as plain text. At most one update per 24 hours, and the same text never twice, so bundle changes into one message.
 
 How to write the text:
 - Write it with the `unslop` skill. No hype, no filler.
 - Keep it short: a one-line opener, then one line per change. About 5 lines at most, readable in a few seconds on a phone.
 - Say what changed and where to find it ("My Alerts → pick an alert → 🌐 German Language"), not how it was built.
 - At most one emoji per line, used as a marker.
-- Show the draft to Alwin and get a yes before sending. Never send one on your own.
+- Show the draft to Alwin and get a yes; he sends it. Never send one on your own.
 
 ## Key Globals & Singletons
 
