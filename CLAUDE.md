@@ -39,8 +39,7 @@ New features go in `features/` as helper modules that bot.py imports and calls. 
 | Module | What it does | Called from |
 |--------|--------------|-------------|
 | `companies` | Per-chat company blocklist, `company_key()` normalization (drops accents and legal suffixes, exact match only) | checker, live search, handlers, admin delete-user |
-| `language` | English/German detection by function-word counts; returns None when unsure | `send_filters` |
-| `german_requirement` | Asks TypeSafe's Jev (pinned `jev-1.14.0`, HTTP, ~1,500 input tokens/job) whether a job needs German: required / optional / not_stated. Needs `TYPESAFE_API_KEY` in `.env`; without it falls back to ad language. Policy: not_stated + German-written ad = needs German | `send_filters` |
+| `german_requirement` | Asks TypeSafe's Jev (pinned `jev-1.14.0`, HTTP, ~1,500 input tokens/job) whether a job needs German: required / optional / not_stated. Needs `TYPESAFE_API_KEY` in `.env`. Policy: skip ONLY when the posting states German is required; not_stated (any ad language) and optional are sent; Jev unavailable = send | `send_filters` |
 | `job_postings` | LinkedIn guest `jobPosting/<id>` fetch → open/closed + description; shared 1.5 s rate limit, 6 h cache | `send_filters`, `saved_status` |
 | `alert_settings` | `alerts.match_language` column: `any` or `nogerman` ("I don't speak German") | checker, alert details |
 | `send_filters` | Pre-send step in the checker: blocklist, then for `nogerman` alerts the Jev check (fetches ≤25 LinkedIn postings per alert per cycle for descriptions, defers the rest, drops closed ones) | `check_single_alert` |

@@ -7865,7 +7865,7 @@ def check_single_alert(alert, bot: Bot):
             f"Alert {alert['id']}: {len(found_jobs)} scraped, "
             f"{duped} duped, {recency_skipped} old, "
             f"{fstats['blocked']} blocked co., {fstats['needs_german']} need German "
-            f"({fstats['fallback']} by fallback), "
+            f"({fstats['unchecked']} unchecked: Jev unavailable), "
             f"{fstats['closed']} closed, {fstats['deferred']} deferred, "
             f"{len(jobs_to_send)} to send"
         )

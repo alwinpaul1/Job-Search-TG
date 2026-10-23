@@ -201,9 +201,8 @@ class _Handlers:
             f"📝 <b>Keywords:</b> {html.escape(alert['keywords'])}\n"
             f"📍 <b>Location:</b> {html.escape(alert['location'])}\n\n"
             "With <b>I don't speak German</b>, each job description is read and "
-            "jobs that ask for German are skipped. Jobs where German is only a "
-            "plus are still sent. An ad written in German that never mentions "
-            "language counts as needing German."
+            "only jobs that say German is required are skipped. Jobs where "
+            "German is a plus, or that don't mention language, are still sent."
         )
         buttons = [
             [InlineKeyboardButton(f"✅ {label}" if code == lang else label,

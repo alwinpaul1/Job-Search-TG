@@ -6,8 +6,12 @@ On 106 hand-labelled real ads (LinkedIn + Arbeitnow, 78 German-written,
 2026-10-22) Jev matched every label; ad-language detection got 93 right and
 phrase rules 99.
 
+A job counts as needing German only when the posting says so. An ad written
+in German that never mentions language is NOT assumed to need it (owner's
+call, 2026-10-23).
+
 Needs TYPESAFE_API_KEY in the environment (.env). Without it, or when the API
-fails, classify() returns None and the caller falls back to ad language.
+fails, classify() returns None and the caller sends the job.
 Cost is input tokens only: about 1,500 per job.
 """
 import logging
@@ -100,13 +104,7 @@ def classify(title, description, cache_key=None):
     return None
 
 
-def english_speaker_can_apply(verdict, ad_language):
-    """The policy, kept in code. A posting silent about German is judged by the
-    language it is written in: in Germany a German ad that says nothing about
-    language expects German (Indeed Hiring Lab found 2.7% of ads say German
-    isn't needed)."""
-    if verdict == REQUIRED:
-        return False
-    if verdict == OPTIONAL:
-        return True
-    return ad_language != "de"
+def needs_german(verdict):
+    """Skip a job only when its posting states German is required. "German is a
+    plus" and postings silent about language, in any language, are sent."""
+    return verdict == REQUIRED
