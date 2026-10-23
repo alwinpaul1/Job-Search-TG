@@ -21,9 +21,11 @@ restarting itself, and a start after an unclean stop (crash, out-of-memory kill)
 What the bot can't report itself (the server, the bot process or its network
 down; rounds that stop finishing) needs an outside check: beat() pings the
 Cloudflare Worker in watchdog/ every 5 min, which messages the owner when the
-pings stop for 30 min or no round has finished for 2 h. Not deployed at the
-moment (see CLAUDE.md); without WATCHDOG_URL the ping is skipped. Not reported, because the bot handles them:
-single LinkedIn 429s, memory clean-ups, planned restarts.
+pings stop for 30 min or no round has finished for 2 h (on Alwin's personal
+Cloudflare account, see CLAUDE.md). Without WATCHDOG_URL the ping is skipped.
+
+Not reported, because the bot handles them: single LinkedIn 429s, memory
+clean-ups, planned restarts.
 
 Messages go straight to the Bot API over HTTPS, so they work from any thread
 and during a restart. Nothing here raises: a failed report is only logged.
