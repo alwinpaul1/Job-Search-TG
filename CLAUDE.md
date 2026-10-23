@@ -194,7 +194,8 @@ How to write the text:
 - `bot.py` starts with a **vendored-urllib3 shim** (before `import telegram`): it loads the repo's `ptb_vendor/urllib3` (1.26.20) under `telegram.vendor.ptb_urllib3.urllib3` in `sys.modules`. Reason: PTB v13's own bundled urllib3 (2016) crashes on Python 3.12 (`ssl.wrap_socket` removed → `NameError: PROTOCOL_SSLv23` on first connect), and PTB's fallback to system urllib3 requires urllib3\<2 — which had 4 high CVEs. With the shim, PTB uses the private py3.12-compatible v1 copy (api.telegram.org traffic only) while the **system urllib3 stays v2** for requests/scrapling/jobquest.
 - Removing the shim or `ptb_vendor/` while system urllib3 is v2 crash-loops the bot at startup.
 - `python-telegram-bot` must stay **13.13** (13.14/13.15 hard-pin `tornado==6.1`, which has high CVEs; 13.13 allows `tornado>=6.1`).
-- `jobquest` was installed from a wheel at `/tmp/jobquest-0.1.12-py3-none-any.whl` that **no longer exists** — never `pip install --force-reinstall` it or touch its version; there is no source to reinstall from.
+- `jobquest` was installed from a wheel at `/tmp/jobquest-0.1.12-py3-none-any.whl` that no longer exists. Its source is Alwin's repo github.com/alwinpaul1/JobQuest: commit `db4ff80` matches the installed 0.1.12 file for file (checked 2026-10-23), and `requirements.lock` pins it there. Don't change its version as a side effect of other work.
+- `requirements.lock` is the exact installed set on the VPS (`uv pip freeze`); rebuild a venv from it, not from `requirements.txt`. Regenerate it after any package change.
 - transformers is NOT upgraded to 5.x (its high-CVE fix) because pinned sentence-transformers 5.1.0 predates transformers v5; the CVE requires loading untrusted model files, which the bot never does (only TechWolf/JobBERT-v3).
 
 ## Common Pitfalls
