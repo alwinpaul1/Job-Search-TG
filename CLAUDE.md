@@ -27,7 +27,7 @@ journalctl -u job-search-bot -f      # live logs (also written to diagnostic.log
 `job-search-bot.service` (`ExecStart=.venv/bin/python -u bot.py`, `Restart=on-failure`).
 `run_bot.sh` is a legacy auto-restart wrapper — running it starts a SECOND instance
 alongside the systemd one, and two instances fight over Telegram `getUpdates`
-("Conflict: terminated by other getUpdates request") and double-scrape. All 5 bots
+("Conflict: terminated by other getUpdates request") and double-scrape. All bots
 on this VPS are systemd services. If you ever see duplicate instances, kill stray
 `run_bot.sh`/`bot.py` processes and `systemctl restart job-search-bot` to get a
 single clean instance.
@@ -172,7 +172,7 @@ How to write the text:
 - **`canonical_link()` regex order AND anchoring matter**: The first matching pattern wins, and the plain-numeric pattern must stay anchored (`/jobs/view/(\d+)(?:[/?#]|$)`) — unanchored, it eats the leading digits of digit-leading slugs (`3d-artist-…` → job_id `"3"`) and silently suppresses future jobs chat-wide.
 - **LinkedIn scraping is fragile**: HTML structure changes can silently break parsing. The scraper has no tests — verify manually after any changes.
 - **Memory pressure**: JobBERT model is ~500MB. The bot auto-unloads it under memory pressure and reloads on demand. Don't hold references to the model outside `get_jobbert_model()`.
-- **Multiple bot.py processes**: Other bots (odoo-time-tracker, claude-tracker, opencode-tracker, yttgbot) also run `python bot.py` on this server. Don't blindly `killall python` or `pkill -f bot.py`.
+- **Multiple bot.py processes**: Other bots (claude-tracker, opencode-tracker) also run `python bot.py` on this server. The YouTube bot (@Hebius_Bot, `/root/YTTGBot`) was stopped and unregistered on 2026-10-23; its files and unit file (`/root/YTTGBot/yttgbot.service`) are kept. Don't blindly `killall python` or `pkill -f bot.py`.
 
 ## Environment
 
