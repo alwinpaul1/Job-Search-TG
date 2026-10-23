@@ -7881,9 +7881,10 @@ def check_single_alert(alert, bot: Bot):
             pass
 
         # Per-user filters: blocked companies, then Jev reads each job's full
-        # description: off-topic for the keywords, and German required for
-        # "I don't speak German" alerts. A job whose description or verdict
-        # isn't available yet is deferred to the next cycle, never sent unchecked.
+        # description (Clef if Jev is down): off-topic for the keywords, and
+        # German required for "I don't speak German" alerts. A job whose
+        # description or verdict isn't available yet is deferred to the next
+        # cycle, never sent unchecked.
         jobs_to_send, fstats = send_filters.apply(
             jobs_to_send,
             cursor=cursor,
@@ -7898,7 +7899,8 @@ def check_single_alert(alert, bot: Bot):
             f"{fstats['blocked']} blocked co., {fstats['off_topic']} off-topic, "
             f"{fstats['needs_german']} need German, {fstats['closed']} closed, "
             f"deferred: {fstats['no_description']} no description, "
-            f"{fstats['jev_down']} Jev unavailable, "
+            f"{fstats['models_down']} Jev and Clef unavailable; "
+            f"{fstats['by_clef']} judged by Clef (Jev down), "
             f"{len(jobs_to_send)} to send"
         )
 

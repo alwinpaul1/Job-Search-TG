@@ -2,6 +2,7 @@
 
     companies           per-chat company blocklist (pure logic + SQL)
     jev                 TypeSafe's Jev model over HTTP (several questions per request)
+    clef                Cloudflare's Clef model, same request shape: the fallback when Jev is down
     german_requirement  the Jev question: does the posting require German?
     job_fit             the Jev question: is the job about the alert's keywords?
     job_postings        LinkedIn guest posting fetch: open/closed status + description

@@ -6,11 +6,12 @@ answers, in one request:
 - for "I don't speak German" alerts: does the posting require German?
   (german_requirement)
 
-No fallback (owner's rule, 2026-10-23): a job is judged only on its full
-description and sent only after Jev has judged it. When the description
-can't be read, or Jev can't be reached, the job is deferred: not sent and
-not recorded, so the next cycle sees it again. It is never judged on its
-title alone and never sent unchecked.
+A job is judged only on its full description and sent only after a model
+has judged it (owner's rule, 2026-10-23). Jev answers; when Jev can't be
+reached the identical request goes to Cloudflare's Clef (features/clef.py).
+When the description can't be read, or neither model answers, the job is
+deferred: not sent and not recorded, so the next cycle sees it again. It is
+never judged on its title alone and never sent unchecked.
 
 Descriptions: Indeed rows carry the full text from the scrape (Indeed sits
 behind Cloudflare and can't be fetched afterwards). LinkedIn search results
@@ -23,7 +24,7 @@ about once, across restarts too.
 import logging
 import time
 
-from features import companies, german_requirement, jev, job_fit, job_postings
+from features import clef, companies, german_requirement, jev, job_fit, job_postings
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +100,7 @@ def _description(job, fetch_budget):
 def apply(jobs, *, cursor, keywords, blocked, no_german):
     """Return (to_send, stats). `blocked` is a set of company keys."""
     stats = {"blocked": 0, "off_topic": 0, "needs_german": 0, "closed": 0,
-             "no_description": 0, "jev_down": 0}
+             "no_description": 0, "models_down": 0, "by_clef": 0}
     kept, stats["blocked"] = companies.drop_blocked(jobs, blocked)
     _prune(cursor)
 
@@ -129,10 +130,14 @@ def apply(jobs, *, cursor, keywords, blocked, no_german):
             state = {"search_keywords": keywords, "job_title": job.get("Title", ""),
                      "job_description": description}
             # Question names are only for code; Jev never sees them.
-            reply = jev.ask(state, {f"q{i}": q for i, q in enumerate(missing.values())})
+            ask = {f"q{i}": q for i, q in enumerate(missing.values())}
+            reply = jev.ask(state, ask)
             if reply is None:
-                stats["jev_down"] += 1
-                continue
+                reply = clef.ask(state, ask)
+                if reply is None:
+                    stats["models_down"] += 1
+                    continue
+                stats["by_clef"] += 1
             fresh = {}
             for i, key in enumerate(missing):
                 answer = reply[f"q{i}"]
