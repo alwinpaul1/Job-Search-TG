@@ -4,6 +4,7 @@
     .venv/bin/python scripts/announce.py --file msg.txt          preview, sends nothing
     .venv/bin/python scripts/announce.py --file msg.txt --test   send only to the owner, to check the look
     .venv/bin/python scripts/announce.py --file msg.txt --send   send to every user
+    add --force to --send only when Alwin explicitly asks to skip the 24 h limit
 
 The text is Telegram HTML (<b>bold</b>); see features/broadcast.py. Blocks are
 separated by blank lines in the file; the script always puts exactly two empty
@@ -55,6 +56,8 @@ def main():
     ap = argparse.ArgumentParser(description="Announce a JobQuest update to every user.")
     ap.add_argument("--file", required=True, help="UTF-8 text file with the announcement")
     ap.add_argument("--send", action="store_true", help="actually send (default: preview only)")
+    ap.add_argument("--force", action="store_true",
+                    help="with --send: skip the 24 h limit (only when Alwin asks); same text still refused")
     ap.add_argument("--test", action="store_true",
                     help="send only to the owner; not recorded, no cooldown")
     args = ap.parse_args()
@@ -78,7 +81,7 @@ def main():
     try:
         cur = conn.cursor()
         chat_ids = broadcast.recipients(cur)
-        reason = broadcast.refusal(cur, text)
+        reason = broadcast.refusal(cur, text, ignore_cooldown=args.force and args.send)
         conn.rollback()
         print(f"Recipients: {len(chat_ids)}")
         print("-" * 60)
@@ -95,7 +98,7 @@ def main():
             print("Preview only. Run again with --send to send it.")
             return 0
 
-        bid, reason = broadcast.claim(cur, text, OWNER_ID, OWNER_NAME)
+        bid, reason = broadcast.claim(cur, text, OWNER_ID, OWNER_NAME, ignore_cooldown=args.force)
         conn.commit()
         if bid is None:
             print(f"⛔ Not sent. {reason}")

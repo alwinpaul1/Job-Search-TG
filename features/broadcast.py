@@ -57,8 +57,11 @@ def recipients(cursor):
     return sorted(row["chat_id"] for row in cursor.fetchall())
 
 
-def refusal(cursor, text, exclude_id=None):
-    """Why an update with this text may not go out now, or None if it may."""
+def refusal(cursor, text, exclude_id=None, ignore_cooldown=False):
+    """Why an update with this text may not go out now, or None if it may.
+
+    ignore_cooldown: the owner's explicit override (announce.py --force); the
+    same text is still never sent twice."""
     cursor.execute(
         """SELECT admin_name, EXTRACT(EPOCH FROM NOW() - sent_at) / 3600 AS hours_ago
            FROM broadcasts
@@ -69,7 +72,7 @@ def refusal(cursor, text, exclude_id=None):
         (COOLDOWN_HOURS, exclude_id),
     )
     row = cursor.fetchone()
-    if row:
+    if row and not ignore_cooldown:
         ago = float(row["hours_ago"])
         who = row["admin_name"] or "Someone"
         return (f"{who} sent an update {ago:.0f} h ago. To avoid spamming users, "
@@ -85,13 +88,13 @@ def refusal(cursor, text, exclude_id=None):
     return None
 
 
-def claim(cursor, text, sender_id, sender_name):
+def claim(cursor, text, sender_id, sender_name, ignore_cooldown=False):
     """Reserve a send: returns (broadcast id, None), or (None, reason) if refused.
 
     Commit right after, before sending, so the cooldown holds even if the
     send is interrupted."""
     cursor.execute("LOCK TABLE broadcasts IN SHARE ROW EXCLUSIVE MODE")
-    reason = refusal(cursor, text)
+    reason = refusal(cursor, text, ignore_cooldown=ignore_cooldown)
     if reason:
         return None, reason
     cursor.execute(

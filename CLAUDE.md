@@ -157,7 +157,8 @@ How to write the text:
   Tap /start to try it.
   ```
 - Keep it short: about three changes, each readable in a few seconds on a phone.
-- Send a `--test` copy to Alwin before `--send`, so he sees the formatting on his phone.
+- Send a `--test` copy to Alwin before `--send`, so he sees the formatting on his phone. One test copy per change, not one per tweak.
+- `--send --force` skips the 24 h limit (never the same-text guard). Use it only when Alwin explicitly asks for that send.
 - Say what changed and where to find it ("My Alerts → pick an alert → 🌐 German Language"), not how it was built.
 - Only what users need (Alwin, 2026-10-23). Never mention admin features (invites, `/admin`, admin screens or rights): every user gets this message.
 - At most one emoji per line, used as a marker.
