@@ -13,9 +13,15 @@ lasts it is repeated at most every REPEAT_S; when it clears, one ✅ line
 follows. A problem that lasts all day sends about four messages.
 
 Reported: alert checks failing, LinkedIn or Indeed failing for most alerts in a
-round, many unreadable LinkedIn job pages, Jev down (Clef judging), Jev and
-Clef both down, the bot restarting itself, and a start after an unclean stop
-(crash, out-of-memory kill). Not reported, because the bot handles them:
+round, LinkedIn or Indeed returning no jobs at all in a round (a silent break,
+e.g. a page-layout change), many unreadable LinkedIn job pages, Jev down (Clef
+judging), Jev and Clef both down, the database not reachable, the bot
+restarting itself, and a start after an unclean stop (crash, out-of-memory kill).
+
+What the bot can't report itself (the server, the bot process or its network
+down; rounds that stop finishing) is caught outside: beat() pings a Cloudflare
+Worker every 5 min (watchdog/ in this repo), which messages the owner when the
+pings stop for 30 min or no round has finished for 2 h. Not reported, because the bot handles them:
 single LinkedIn 429s, memory clean-ups, planned restarts.
 
 Messages go straight to the Bot API over HTTPS, so they work from any thread
@@ -40,6 +46,7 @@ _owner = [None]
 _lock = threading.Lock()
 _open = {}          # kind -> {"since": epoch, "last_sent": epoch}
 _cycle = None       # notes collected during one alert-check round
+_last_round_end = [time.time()]   # start counts as a finished round for the watchdog
 
 
 def setup(owner_id):
@@ -66,7 +73,7 @@ def _message(head, lines):
 
 def _duration(seconds):
     m = max(1, int(seconds // 60))
-    return f"{m} min" if m < 120 else f"{m // 60} h {m % 60} min"
+    return f"{m} min" if m < 120 else f"{m // 60} h" + (f" {m % 60} min" if m % 60 else "")
 
 
 def problem(*items):
@@ -136,7 +143,8 @@ def restarting_itself(reason):
 
 def cycle_start(n_alerts):
     global _cycle
-    _cycle = {"alerts": n_alerts, "failed": [], "linkedin_down": 0, "indeed_down": 0, "unreadable": 0}
+    _cycle = {"alerts": n_alerts, "failed": [], "linkedin_down": 0, "indeed_down": 0, "unreadable": 0,
+              "scrapes": 0, "linkedin_jobs": 0, "indeed_jobs": 0}
 
 
 def note_failed(alert_id, error):
@@ -147,6 +155,14 @@ def note_failed(alert_id, error):
 def note_board_down(board):
     if _cycle is not None:
         _cycle[f"{board}_down"] += 1
+
+
+def note_scrape(linkedin_jobs, indeed_jobs):
+    """One alert's scrape: how many jobs each board returned (before any filter)."""
+    if _cycle is not None:
+        _cycle["scrapes"] += 1
+        _cycle["linkedin_jobs"] += linkedin_jobs
+        _cycle["indeed_jobs"] += indeed_jobs
 
 
 def note_unreadable(n):
@@ -169,6 +185,7 @@ def cycle_end(interrupted=False):
     c, _cycle = _cycle, None
     if c is None or interrupted:
         return
+    _last_round_end[0] = time.time()
     n = c["alerts"]
     found, cleared = [], []
 
@@ -187,6 +204,12 @@ def cycle_end(interrupted=False):
             found.append((board, f"{name} is blocking the bot: {down} of {n} alerts got no {name} jobs"))
         else:
             cleared.append((board, f"{name} works again"))
+            # No errors, yet nothing at all from the board: its pages probably changed.
+            if c["scrapes"] >= 5 and c[f"{board}_jobs"] == 0:
+                found.append((f"{board}_empty", f"{name} returned no jobs for any of {c['scrapes']} alerts: "
+                                                f"its search page may have changed"))
+            elif c[f"{board}_jobs"]:
+                cleared.append((f"{board}_empty", f"{name} returns jobs again"))
 
     if c["unreadable"] >= 20:
         found.append(("postings", f"LinkedIn job pages won't load: {c['unreadable']} jobs waiting"))
@@ -197,3 +220,36 @@ def cycle_end(interrupted=False):
         problem(*found)
     if cleared:
         resolved(*cleared)
+
+
+# --- Heartbeat --------------------------------------------------------------
+
+def beat(get_conn, return_conn):
+    """Every few minutes: check the database, then tell the outside watchdog
+    the bot is alive and when it last finished a round."""
+    db_ok = True
+    try:
+        conn = get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            cur.fetchone()
+            conn.rollback()
+        finally:
+            return_conn(conn)
+    except Exception as e:
+        db_ok = False
+        problem(("db", f"The database is not reachable ({type(e).__name__})"))
+    if db_ok:
+        resolved(("db", "The database works again"))
+
+    url = os.environ.get("WATCHDOG_URL", "").strip()
+    secret = os.environ.get("WATCHDOG_SECRET", "").strip()
+    if not url or not secret:
+        return
+    try:
+        requests.post(url.rstrip("/") + "/beat", timeout=10,
+                      headers={"Authorization": f"Bearer {secret}"},
+                      json={"round_end": int(_last_round_end[0]), "db_ok": db_ok})
+    except Exception as e:
+        logger.warning(f"Watchdog ping failed: {e}")

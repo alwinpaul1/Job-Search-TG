@@ -1,0 +1,17 @@
+# JobQuest watchdog (see src/index.js). Deploy: cd watchdog && wrangler deploy
+# Secrets, set once with `wrangler secret put`: WATCHDOG_SECRET, TELEGRAM_BOT_TOKEN.
+name = "jobquest-watchdog"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+account_id = "bd5f342142b6410e1438260214d9990b"   # Alwin@nexdash.com
+
+[vars]
+OWNER_CHAT_ID = "7744296624"   # Alwin, the master admin
+
+[triggers]
+crons = ["*/10 * * * *"]
+
+[[kv_namespaces]]
+binding = "STATE"
+id = "e0a6fa36dd6b4b869a4a0b015f890d3e"

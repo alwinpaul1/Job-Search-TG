@@ -5995,6 +5995,7 @@ def _jobquest_scrape_multi_board(keyword, location, filters_dict, results_wanted
     # A blocked IP / total outage must NOT look like "no jobs today": if every
     # board hard-failed (vs. returned empty), raise so callers treat this cycle
     # as a failed check — last_checked stays put and the next cycle retries.
+    ops_alerts.note_scrape(len(li_jobs or []), 0 if ig_df is None else len(ig_df))
     if li_failed:
         ops_alerts.note_board_down("linkedin")
     if ig_failed:
@@ -8533,6 +8534,17 @@ def main():
             max_instances=1,
             id="saved_job_status",
             next_run_time=datetime.now(pytz.UTC) + timedelta(minutes=10),
+        )
+
+        # Database check + ping to the outside watchdog (features/ops_alerts.py, watchdog/)
+        scheduler.add_job(
+            ops_alerts.beat,
+            "interval",
+            minutes=5,
+            args=[get_db_connection, db_pool.return_connection],
+            max_instances=1,
+            id="watchdog_beat",
+            next_run_time=datetime.now(pytz.UTC) + timedelta(seconds=30),
         )
 
         for sig in (signal.SIGINT, signal.SIGTERM):
