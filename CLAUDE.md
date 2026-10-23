@@ -135,14 +135,29 @@ There is no `/update` command. Announcements are sent only from the server, from
 ```bash
 cd /root/Job-Search-TG
 .venv/bin/python scripts/announce.py --file msg.txt          # preview: recipient count, exact text, whether a send is allowed now
+.venv/bin/python scripts/announce.py --file msg.txt --test   # send one copy to Alwin only, to check the look (not recorded)
 .venv/bin/python scripts/announce.py --file msg.txt --send   # send to every chat in user_settings ∪ alerts
 ```
 
-The text goes out exactly as written, as plain text. At most one update per 24 hours, and the same text never twice, so bundle changes into one message.
+The text is Telegram HTML and goes out exactly as written. At most one update per 24 hours, and the same text never twice, so bundle changes into one message.
 
 How to write the text:
 - Write it with the `unslop` skill. No hype, no filler.
-- Keep it short: a one-line opener, then one line per change. About 5 lines at most, readable in a few seconds on a phone.
+- Format it (Alwin, 2026-10-23): a bold title, then one block per change with a bold heading and a short line under it, a blank line between blocks. Escape `&`, `<`, `>` as `&amp;` `&lt;` `&gt;`. Shape:
+
+  ```
+  📢 <b>JobQuest update</b>
+
+  🚫 <b>Block a company</b>
+  Tap Block company under any job alert. Undo it in Preferences → Blocked Companies.
+
+  🌐 <b>…next change…</b>
+  …
+
+  Tap /start to try it.
+  ```
+- Keep it short: about three changes, each readable in a few seconds on a phone.
+- Send a `--test` copy to Alwin before `--send`, so he sees the formatting on his phone.
 - Say what changed and where to find it ("My Alerts → pick an alert → 🌐 German Language"), not how it was built.
 - Only what users need (Alwin, 2026-10-23). Never mention admin features (invites, `/admin`, admin screens or rights): every user gets this message.
 - At most one emoji per line, used as a marker.

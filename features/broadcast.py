@@ -11,7 +11,9 @@ Spam guards, enforced in the `broadcasts` table:
 - after an update goes out, no other one is allowed for COOLDOWN_HOURS;
 - the exact same text is never sent twice.
 
-The text goes out exactly as written, as plain text. Recipients: every chat in
+The text is Telegram HTML (<b>, <i>, <a href>): escape a literal &, < or > as
+&amp; &lt; &gt;. Telegram refuses a message with broken tags, so send a --test
+copy to the owner first. Recipients: every chat in
 user_settings or alerts, at ~20 messages/second. How to write the text: see
 "Update announcements" in CLAUDE.md.
 
@@ -114,7 +116,7 @@ def send_all(token, chat_ids, text, gap_s=_SEND_GAP_S, post=requests.post):
     for chat_id in chat_ids:
         for attempt in (1, 2):
             try:
-                resp = post(url, json={"chat_id": chat_id, "text": text,
+                resp = post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML",
                                        "disable_web_page_preview": True}, timeout=20)
                 body = resp.json()
             except (requests.RequestException, ValueError) as e:

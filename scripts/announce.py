@@ -2,7 +2,10 @@
 
     cd /root/Job-Search-TG
     .venv/bin/python scripts/announce.py --file msg.txt          preview, sends nothing
+    .venv/bin/python scripts/announce.py --file msg.txt --test   send only to the owner, to check the look
     .venv/bin/python scripts/announce.py --file msg.txt --send   send to every user
+
+The text is Telegram HTML (<b>bold</b>); see features/broadcast.py.
 
 The preview prints the recipient count, the exact text, and whether the spam
 guards (features/broadcast.py) allow a send right now. Exit codes: 0 sent or
@@ -49,6 +52,8 @@ def main():
     ap = argparse.ArgumentParser(description="Announce a JobQuest update to every user.")
     ap.add_argument("--file", required=True, help="UTF-8 text file with the announcement")
     ap.add_argument("--send", action="store_true", help="actually send (default: preview only)")
+    ap.add_argument("--test", action="store_true",
+                    help="send only to the owner; not recorded, no cooldown")
     args = ap.parse_args()
 
     load_dotenv(ROOT / ".env")
@@ -74,6 +79,10 @@ def main():
         print("-" * 60)
         print(text)
         print("-" * 60)
+        if args.test:
+            sent, _, _ = broadcast.send_all(token, [OWNER_ID], text)
+            print("✅ Test copy sent to the owner." if sent else "⛔ Test copy failed (see the warning above).")
+            return 0 if sent else 2
         if reason:
             print(f"⛔ Not allowed now. {reason}")
             return 1
