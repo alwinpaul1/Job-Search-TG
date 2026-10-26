@@ -13,6 +13,8 @@ Callback data:
     bc_back                 back to Preferences
     ams_<alert>             German-language screen for one alert
     ams_l_<alert>_<code>    set it (any / nogerman)
+    aml_<alert>             the same screen for an admin, on anyone's alert
+    aml_l_<alert>_<code>    set it (admins only; Back returns to /admin's alert screen)
     sj_rmclosed             delete closed saved jobs, then redraw Saved Jobs
 """
 import html
@@ -50,11 +52,12 @@ def _short(name, limit=28):
 
 
 class _Handlers:
-    def __init__(self, get_conn, return_conn, preferences_menu, saved_jobs_menu):
+    def __init__(self, get_conn, return_conn, preferences_menu, saved_jobs_menu, admin_ids):
         self.get_conn = get_conn
         self.return_conn = return_conn
         self.preferences_menu = preferences_menu
         self.saved_jobs_menu = saved_jobs_menu
+        self.admin_ids = admin_ids
 
     def _db(self, fn):
         """Run fn(cursor) in one transaction and return its result."""
@@ -184,20 +187,21 @@ class _Handlers:
 
     # --- per-alert job language ---------------------------------------------
 
-    def _load_alert(self, alert_id, chat_id):
+    def _load_alert(self, alert_id, chat_id=None):
+        """The alert, if it belongs to chat_id (any chat when chat_id is None: admins)."""
         def work(cur):
-            cur.execute(
-                "SELECT * FROM alerts WHERE id = %s AND chat_id = %s",
-                (alert_id, chat_id),
-            )
-            return cur.fetchone()
+            cur.execute("SELECT * FROM alerts WHERE id = %s", (alert_id,))
+            alert = cur.fetchone()
+            return alert if alert and chat_id in (None, alert["chat_id"]) else None
         return self._db(work)
 
-    def _render_settings(self, query, alert):
+    def _render_settings(self, query, alert, admin=False):
         lang = alert_settings.language_of(alert)
         aid = alert["id"]
+        prefix, back = ("aml", f"adm_va_{aid}") if admin else ("ams", f"view_alert_{aid}")
+        title = f"🌐 <b>German Language</b> · Alert #{aid}" if admin else "🌐 <b>German Language</b>"
         text = (
-            "🌐 <b>German Language</b>\n\n"
+            f"{title}\n\n"
             f"📝 <b>Keywords:</b> {html.escape(alert['keywords'])}\n"
             f"📍 <b>Location:</b> {html.escape(alert['location'])}\n\n"
             "With <b>I don't speak German</b>, each job description is read and "
@@ -206,9 +210,9 @@ class _Handlers:
         )
         buttons = [
             [InlineKeyboardButton(f"✅ {label}" if code == lang else label,
-                                  callback_data=f"ams_l_{aid}_{code}")
+                                  callback_data=f"{prefix}_l_{aid}_{code}")
              for code, label in alert_settings.LANGUAGES.items()],
-            [InlineKeyboardButton("⬅️ Back to Alert", callback_data=f"view_alert_{aid}")],
+            [InlineKeyboardButton("⬅️ Back to Alert", callback_data=back)],
         ]
         _edit(query, text, InlineKeyboardMarkup(buttons))
 
@@ -233,6 +237,35 @@ class _Handlers:
         if alert:
             self._render_settings(query, alert)
 
+    def admin_settings_show(self, update, context):
+        query = update.callback_query
+        if update.effective_user.id not in self.admin_ids:
+            _answer(query)
+            return
+        _answer(query)
+        alert = self._load_alert(int(context.match.group(1)))
+        if not alert:
+            _edit(query, "❌ Alert not found.", None)
+            return
+        self._render_settings(query, alert, admin=True)
+
+    def admin_settings_set(self, update, context):
+        query = update.callback_query
+        if update.effective_user.id not in self.admin_ids:
+            _answer(query)
+            return
+        alert_id, value = int(context.match.group(1)), context.match.group(2)
+        alert = self._load_alert(alert_id)
+        if not alert or not self._db(
+                lambda cur: alert_settings.set_language(cur, alert_id, alert["chat_id"], value)):
+            _answer(query, "❌ Alert not found")
+            return
+        logger.info(f"Admin {update.effective_user.id} set alert {alert_id} German setting to {value}")
+        _answer(query, "✅ Saved. Applies from the next check.")
+        alert = self._load_alert(alert_id)
+        if alert:
+            self._render_settings(query, alert, admin=True)
+
     # --- saved jobs ---------------------------------------------------------
 
     def remove_closed_saved(self, update, context):
@@ -244,8 +277,10 @@ class _Handlers:
         self.saved_jobs_menu(update, context)
 
 
-def register(dispatcher, *, get_conn, return_conn, preferences_menu, saved_jobs_menu, group):
-    h = _Handlers(get_conn, return_conn, preferences_menu, saved_jobs_menu)
+def register(dispatcher, *, get_conn, return_conn, preferences_menu, saved_jobs_menu,
+             admin_ids, group):
+    """admin_ids: bot.py's ADMIN_USER_IDS set (kept live by features/admins.py)."""
+    h = _Handlers(get_conn, return_conn, preferences_menu, saved_jobs_menu, admin_ids)
     for callback, pattern in (
         (h.block_toggle, r"^bc_(add|undo)_"),
         (h.blocked_list, r"^bc_list$"),
@@ -253,6 +288,8 @@ def register(dispatcher, *, get_conn, return_conn, preferences_menu, saved_jobs_
         (h.blocked_back, r"^bc_back$"),
         (h.settings_show, r"^ams_(\d+)$"),
         (h.settings_set, r"^ams_l_(\d+)_([a-z]+)$"),
+        (h.admin_settings_show, r"^aml_(\d+)$"),
+        (h.admin_settings_set, r"^aml_l_(\d+)_([a-z]+)$"),
         (h.remove_closed_saved, r"^sj_rmclosed$"),
     ):
         dispatcher.add_handler(CallbackQueryHandler(callback, pattern=pattern), group=group)

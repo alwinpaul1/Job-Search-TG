@@ -2769,6 +2769,7 @@ def admin_view_alert_details(update: Update, context: CallbackContext):
         f"📬 <b>Jobs Sent:</b> {sent_count}\n"
         f"🕒 <b>Last Checked:</b> {last_checked_display}\n"
         f"{filters_text}"
+        f"{alert_settings.summary_html(alert)}"
     )
 
     action_text = "⏸️ Pause" if alert["is_active"] else "▶️ Resume"
@@ -2777,7 +2778,8 @@ def admin_view_alert_details(update: Update, context: CallbackContext):
     keyboard = [
         [InlineKeyboardButton("✏️ Edit Keywords", callback_data=f"adm_editkw_{alert_id}"),
          InlineKeyboardButton("✏️ Edit Location", callback_data=f"adm_editloc_{alert_id}")],
-        [InlineKeyboardButton("🔧 Edit Filters", callback_data=f"adm_editflt_{alert_id}")],
+        [InlineKeyboardButton("🔧 Edit Filters", callback_data=f"adm_editflt_{alert_id}"),
+         InlineKeyboardButton("🌐 German Language", callback_data=f"aml_{alert_id}")],
         [InlineKeyboardButton(action_text, callback_data=action_cb)],
         [InlineKeyboardButton("🗑️ Delete", callback_data=f"adm_delstart_{alert_id}")],
         [InlineKeyboardButton("⬅️ Back to User Alerts", callback_data=f"adm_back_user_{chat_id}")],
@@ -3378,6 +3380,7 @@ def _send_admin_alert_details(message, alert_id, context):
         f"\U0001f4ec <b>Jobs Sent:</b> {sent_count}\n"
         f"\U0001f551 <b>Last Checked:</b> {last_checked_display}\n"
         f"{filters_text}"
+        f"{alert_settings.summary_html(alert)}"
     )
 
     action_text = "\u23f8\ufe0f Pause" if alert["is_active"] else "\u25b6\ufe0f Resume"
@@ -3386,7 +3389,8 @@ def _send_admin_alert_details(message, alert_id, context):
     keyboard = [
         [InlineKeyboardButton("\u270f\ufe0f Edit Keywords", callback_data=f"adm_editkw_{alert_id}"),
          InlineKeyboardButton("\u270f\ufe0f Edit Location", callback_data=f"adm_editloc_{alert_id}")],
-        [InlineKeyboardButton("\U0001f527 Edit Filters", callback_data=f"adm_editflt_{alert_id}")],
+        [InlineKeyboardButton("\U0001f527 Edit Filters", callback_data=f"adm_editflt_{alert_id}"),
+         InlineKeyboardButton("\U0001f310 German Language", callback_data=f"aml_{alert_id}")],
         [InlineKeyboardButton(action_text, callback_data=action_cb)],
         [InlineKeyboardButton("\U0001f5d1\ufe0f Delete", callback_data=f"adm_delstart_{alert_id}")],
         [InlineKeyboardButton("\u2b05\ufe0f Back to User Alerts", callback_data=f"adm_back_user_{chat_id}")],
@@ -8844,13 +8848,14 @@ def main():
     dispatcher.add_handler(CallbackQueryHandler(unsave_from_alert_callback, pattern="^unsave_from_alert_"), group=1)
 
     # Blocked companies, per-alert German setting, closed saved jobs
-    # (features/handlers.py). Own group; their bc_/ams_/sj_ prefixes match nothing else.
+    # (features/handlers.py). Own group; their bc_/ams_/aml_/sj_ prefixes match nothing else.
     feature_handlers.register(
         dispatcher,
         get_conn=get_db_connection,
         return_conn=db_pool.return_connection,
         preferences_menu=preferences_menu,
         saved_jobs_menu=saved_jobs_menu,
+        admin_ids=ADMIN_USER_IDS,
         group=3,
     )
     # Invite-only: a group -1 gate stops updates from anyone not invited;
@@ -8881,7 +8886,10 @@ def main():
     admin_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("admin", admin_command)],
         name="admin_conversation",
-        persistent=False,
+        # Saved with the main conversation, so a restart (deploy, or Ubuntu's
+        # unattended-upgrades restarting services after a library update)
+        # doesn't throw an admin out of the panel or an edit in progress.
+        persistent=True,
         states={
             ADMIN_MENU: [
                 CallbackQueryHandler(admin_view_user_alerts, pattern=r"^adm_user_\d+$"),
