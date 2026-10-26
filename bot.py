@@ -5790,7 +5790,12 @@ def _jobquest_df_to_bot_jobs(df):
 # State per keyword+location (in-memory, re-learns within a few cycles after restart):
 #   depth        — results/site to pull next time
 #   ema_dur      — EMA of measured scrape wall-time (drives the timeout)
-#   sec_per_job  — EMA of measured per-result latency (drives the depth ceiling)
+#   per_site     — results/site requested by the last scrape
+#   sec_per_job  — EMA of the alert's WHOLE time per requested result (scrape,
+#                  JobBERT matching, Jev filtering, sending; drives the depth
+#                  ceiling). Scrape time alone undercounted by ~30%, so rounds
+#                  ran to the full 30 min and twice skipped the next round
+#                  (24 Oct 18:54, 25 Oct 03:54).
 _alert_scrape_state = {}
 _SCRAPE_PAGE = 25                  # LinkedIn guest API returns 25/page; the natural unit
 _SCHEDULER_INTERVAL_S = 30 * 60    # alert-check interval (see scheduler add_job)
@@ -5848,7 +5853,15 @@ def _record_scrape_duration(keyword, location, duration, per_site):
         {"depth": _SCRAPE_PAGE, "ema_dur": None, "sec_per_job": None},
     )
     st["ema_dur"] = duration if st["ema_dur"] is None else 0.6 * st["ema_dur"] + 0.4 * duration
-    spj = duration / max(1, per_site)
+    st["per_site"] = per_site
+
+
+def _record_alert_duration(keyword, location, duration):
+    """Feed one alert check's whole duration back into its depth ceiling."""
+    st = _alert_scrape_state.get(_scrape_key(keyword, location))
+    if not st or not st.get("per_site"):
+        return
+    spj = duration / max(1, st["per_site"])
     st["sec_per_job"] = spj if st["sec_per_job"] is None else 0.6 * st["sec_per_job"] + 0.4 * spj
 
 
@@ -7796,6 +7809,9 @@ def check_single_alert(alert, bot: Bot):
         if not lock_acquired:
             logger.error(f"Failed to acquire alert AI lock for alert {alert['id']} after 5 minutes")
             return
+        # The alert's own work starts here (waiting for a live search's lock
+        # isn't this alert's cost); its total sets next cycle's scrape depth.
+        work_start = time.time()
             
         try:
             logger.info(f"Alert AI lock acquired for background alert {alert['id']}.")
@@ -8094,6 +8110,7 @@ def check_single_alert(alert, bot: Bot):
             (alert["id"],)
         )
         conn.commit()
+        _record_alert_duration(alert["keywords"], alert["location"], time.time() - work_start)
 
         time.sleep(2)
 
