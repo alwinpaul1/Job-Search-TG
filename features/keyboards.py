@@ -31,7 +31,7 @@ def alert_job_keyboard(job_link, job_unique_id, *, saved, has_company):
         ],
     ]
     if has_company:
-        rows.insert(1, [block_button(job_unique_id, False)])
+        rows.append([block_button(job_unique_id, False)])   # last row (Alwin, 2026-10-26)
     return InlineKeyboardMarkup(rows)
 
 
