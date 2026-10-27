@@ -115,7 +115,7 @@ Entry point: `/admin` (restricted to the `ADMIN_USER_IDS` set). The set in bot.p
 
 | State | Purpose |
 |-------|---------|
-| `ADMIN_MENU` | Paginated user list: everyone in `alerts` ∪ `allowed_users` (shows names, alert counts; a new joiner shows "no alerts yet"), built by `_admin_users_page` / `_admin_user_button` for both `/admin` and the page buttons |
+| `ADMIN_MENU` | Paginated user list: everyone in `alerts` ∪ `allowed_users` (shows names, alert counts; a new joiner shows "No alerts set"), built by `_admin_users_page` / `_admin_user_button` for both `/admin` and the page buttons |
 | `ADMIN_USER_ALERTS` | Single user's alerts list + delete-user flow + Pause/Resume-All toggle |
 | `ADMIN_ALERT_DETAILS` | Single alert detail view + pause/resume/delete + edit entry points |
 | `ADMIN_EDIT_KEYWORDS` | Text input for new keywords |

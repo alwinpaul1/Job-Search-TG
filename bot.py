@@ -2500,7 +2500,7 @@ def _admin_users_page(cursor, offset):
 def _admin_user_button(u):
     label = _format_user_label(u["first_name"], u["username"], u["chat_id"])
     total, active = u["alert_count"], u["active_count"] or 0
-    text = f"{label} — {total} alerts ({active} active)" if total else f"{label} — no alerts yet"
+    text = f"{label} — {total} alerts ({active} active)" if total else f"{label} — No alerts set"
     return InlineKeyboardButton(text, callback_data=f"adm_user_{u['chat_id']}")
 
 
@@ -2626,7 +2626,7 @@ def admin_view_user_alerts(update: Update, context: CallbackContext):
     )
     escaped_label = escape_markdown(user_label)
     if not alerts:
-        text = f"{escaped_label}\n\nNo alerts found."
+        text = f"{escaped_label}\n\nNo alerts set."
     else:
         text = f"{escaped_label}\n\n📋 {len(alerts)} alert(s):\n"
 
