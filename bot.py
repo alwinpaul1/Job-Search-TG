@@ -3794,13 +3794,34 @@ def parse_date_posted(date_str):
     return now
 
 
-def create_paginated_job_message(jobs, page):
+# Paged job lists. "search": 🚀 Start Search results (buttons handled in the
+# Browse state). "alert": the jobs a new alert finds open right now; its
+# buttons are handled outside the conversation, so they work in any state.
+# Each list keeps its own jobs in user_data, so one never pages or saves
+# from the other.
+JOB_LISTS = {
+    "search": {"jobs": "jobs", "page": "page", "meta": "search_meta", "nav": "page",
+               "close": "close", "count": "ignore", "save": "ps"},
+    "alert": {"jobs": "alert_jobs", "page": "alert_page", "meta": "alert_meta", "nav": "apage",
+              "close": "aclose", "count": "aignore", "save": "pa"},
+}
+
+
+def _link_tag(link):
+    """Short check value in save-button callback data (Telegram allows 64 bytes)."""
+    return hashlib.md5(link.encode()).hexdigest()[:8]
+
+
+def create_paginated_job_message(jobs, page, kind="search", saved=frozenset(), header=""):
+    """(text, keyboard) for one page. Jobs are numbered 1-5 and a 💾 n button
+    under the page saves job n (✅ n when it's saved; tap again to remove)."""
+    keys = JOB_LISTS[kind]
     start_index = page * JOBS_PER_PAGE
     end_index = start_index + JOBS_PER_PAGE
     total_pages = (len(jobs) + JOBS_PER_PAGE - 1) // JOBS_PER_PAGE
 
-    message_text = f"<b>Displaying page {page + 1} of {total_pages}</b>\n\n"
-    for job in jobs[start_index:end_index]:
+    message_text = f"{header}<b>Displaying page {page + 1} of {total_pages}</b>\n\n"
+    for number, job in enumerate(jobs[start_index:end_index], 1):
         # Use HTML formatting and escape special characters
         title = html.escape(job["Title"])
         company = html.escape(job["Company"]) if job["Company"] else ""
@@ -3818,7 +3839,7 @@ def create_paginated_job_message(jobs, page):
         else:
             company_line = ""
 
-        message_text += f"<b>{title}</b>\n"
+        message_text += f"<b>{number}. {title}</b>\n"
         message_text += f"{company_line}\n"
         if date_posted:
             message_text += f"Posted: {date_posted}\n"
@@ -3827,25 +3848,58 @@ def create_paginated_job_message(jobs, page):
     if not jobs[start_index:end_index]:
         return "No jobs to display.", None
 
+    save_row = [
+        InlineKeyboardButton(
+            f"✅ {number}" if job["Link"] in saved else f"💾 {number}",
+            callback_data=f"{keys['save']}_{index}_{_link_tag(job['Link'])}")
+        for number, (index, job) in enumerate(
+            enumerate(jobs[start_index:end_index], start_index), 1)
+    ]
+
     row = []
     if page > 0:
         row.append(
-            InlineKeyboardButton("⬅️ Prev", callback_data=f"page_{page - 1}")
+            InlineKeyboardButton("⬅️ Prev", callback_data=f"{keys['nav']}_{page - 1}")
         )
 
     if total_pages > 1:
         row.append(
             InlineKeyboardButton(f"{page + 1}/{total_pages}",
-                                 callback_data="ignore")
+                                 callback_data=keys["count"])
         )
 
     if end_index < len(jobs):
         row.append(
-            InlineKeyboardButton("Next ➡️", callback_data=f"page_{page + 1}")
+            InlineKeyboardButton("Next ➡️", callback_data=f"{keys['nav']}_{page + 1}")
         )
 
-    buttons = [row, [InlineKeyboardButton("❌ Close", callback_data="close")]]
-    return message_text, InlineKeyboardMarkup(buttons)
+    buttons = [save_row, row, [InlineKeyboardButton("❌ Close", callback_data=keys["close"])]]
+    return message_text, InlineKeyboardMarkup([r for r in buttons if r])
+
+
+def _saved_links(chat_id, links):
+    """The subset of `links` this chat has saved."""
+    if not links:
+        return set()
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT job_link FROM saved_jobs WHERE chat_id = %s AND job_link = ANY(%s)",
+                       (chat_id, list(links)))
+        return {r["job_link"] for r in cursor.fetchall()}
+    except Exception as e:
+        logger.warning(f"Saved-jobs lookup failed for {chat_id}: {e}")
+        return set()
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
+
+
+def job_list_page(chat_id, jobs, page, kind="search", header=""):
+    """create_paginated_job_message with the page's saved jobs marked ✅."""
+    page_links = [j["Link"] for j in jobs[page * JOBS_PER_PAGE:(page + 1) * JOBS_PER_PAGE]]
+    return create_paginated_job_message(jobs, page, kind, _saved_links(chat_id, page_links), header)
 
 
 def get_job_description(job_link):
@@ -6358,7 +6412,9 @@ def run_scrape_threaded(
 
             context.user_data["jobs"] = sorted_jobs
             context.user_data["page"] = 0
-            message_text, reply_markup = create_paginated_job_message(sorted_jobs, 0)
+            context.user_data["search_meta"] = {"keywords": search_keyword,
+                                                "location": search_location}
+            message_text, reply_markup = job_list_page(user_id, sorted_jobs, 0)
 
             if progress_msg:
                 progress_msg.edit_text(
@@ -6387,36 +6443,39 @@ def run_scrape(update: Update, context: CallbackContext, progress_msg):
 
 
 # --- Browse and End Handlers ---
-def _check_search_jobs(user_id, jobs, count):
-    """Have Jev judge live-search jobs until the first `count` are checked
+def _check_search_jobs(user_id, jobs, count, kind="search"):
+    """Have Jev judge a job list until the first `count` are checked
     (features/search_pages.py). If that fails, the jobs are shown unjudged."""
     try:
-        search_pages.check(user_id, jobs, count,
+        search_pages.check(user_id, jobs, count, kind=kind,
                            get_conn=get_db_connection, return_conn=db_pool.return_connection)
     except Exception as e:
-        logger.warning(f"Live search {user_id}: judging jobs failed, showing them unjudged: {e}")
+        logger.warning(f"Job list ({kind}) {user_id}: judging jobs failed, showing them unjudged: {e}")
 
 
-def _prefetch_search_page(user_id, jobs, page):
+def _prefetch_search_page(user_id, jobs, page, kind="search"):
     """Judge `page` in the background while the user reads the one before it."""
-    executor.submit(_check_search_jobs, user_id, jobs, (page + 1) * JOBS_PER_PAGE)
+    executor.submit(_check_search_jobs, user_id, jobs, (page + 1) * JOBS_PER_PAGE, kind)
 
 
-def _show_search_page_later(query, context, user_id, jobs, page):
-    """Judge, then show, a live-search page the background check hadn't reached."""
-    _check_search_jobs(user_id, jobs, (page + 1) * JOBS_PER_PAGE)
+def _show_search_page_later(query, context, user_id, jobs, page, kind="search"):
+    """Judge (if the background check hadn't got there), then show, a list page."""
+    keys = JOB_LISTS[kind]
+    _check_search_jobs(user_id, jobs, (page + 1) * JOBS_PER_PAGE, kind)
     if not jobs:
         query.edit_message_text("No more jobs about your keywords in these results.")
         return
     page = min(page, (len(jobs) - 1) // JOBS_PER_PAGE)
-    context.user_data["page"] = page
-    message_text, reply_markup = create_paginated_job_message(jobs, page)
+    context.user_data[keys["page"]] = page
+    header = (context.user_data.get(keys["meta"]) or {}).get("header", "")
+    message_text, reply_markup = job_list_page(query.message.chat_id, jobs, page, kind, header)
     try:
         query.edit_message_text(text=message_text, reply_markup=reply_markup,
                                 parse_mode=ParseMode.HTML, disable_web_page_preview=True)
     except telegram.error.TelegramError as e:
-        logger.warning(f"Live search {user_id}: could not show page {page + 1}: {e}")
-    _prefetch_search_page(user_id, jobs, page + 1)
+        if "message is not modified" not in str(e).lower():
+            logger.warning(f"Job list ({kind}) {user_id}: could not show page {page + 1}: {e}")
+    _prefetch_search_page(user_id, jobs, page + 1, kind)
 
 
 def page_navigation(update: Update, context: CallbackContext):
@@ -6451,7 +6510,7 @@ def page_navigation(update: Update, context: CallbackContext):
 
         page = min(page, max(0, (len(jobs) - 1) // JOBS_PER_PAGE))
         context.user_data["page"] = page
-        message_text, reply_markup = create_paginated_job_message(jobs, page)
+        message_text, reply_markup = job_list_page(query.message.chat_id, jobs, page)
         
         if not message_text or not reply_markup:
             logger.warning(f"⚠️ Page navigation: Empty message for page {page}, user {user_id}")
@@ -6493,7 +6552,120 @@ def close_Browse(update: Update, context: CallbackContext):
     # Clear search results to free up memory
     context.user_data.pop("jobs", None)
     context.user_data.pop("page", None)
+    context.user_data.pop("search_meta", None)
     return main_menu(update, context)
+
+
+def page_save_callback(update: Update, context: CallbackContext):
+    """💾 n under a job list page saves job n; ✅ n (saved) removes it again.
+    Outside the conversation, so it works in any state."""
+    query = update.callback_query
+    prefix, index, tag = query.data.split("_")
+    kind = "search" if prefix == "ps" else "alert"
+    keys = JOB_LISTS[kind]
+    jobs = context.user_data.get(keys["jobs"]) or []
+    index = int(index)
+    if index >= len(jobs) or _link_tag(jobs[index]["Link"]) != tag:
+        # A newer search or alert list replaced this one.
+        try:
+            query.answer("❌ This list has been replaced by a newer one.")
+        except telegram.error.TelegramError:
+            pass
+        return
+    job = jobs[index]
+    meta = context.user_data.get(keys["meta"]) or {}
+    chat_id = query.message.chat_id
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM saved_jobs WHERE chat_id = %s AND job_link = %s",
+                       (chat_id, job["Link"]))
+        saved = cursor.rowcount == 0
+        if saved:
+            date_posted = job.get("Date Posted")
+            cursor.execute(
+                """INSERT INTO saved_jobs
+                   (chat_id, job_link, job_title, company, location, date_posted,
+                    alert_keywords, alert_location)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                (chat_id, job["Link"], job["Title"], job.get("Company"), job.get("Location"),
+                 date_posted if date_posted and date_posted != "N/A" else None,
+                 meta.get("keywords"), meta.get("location")),
+            )
+        conn.commit()
+    except psycopg2.IntegrityError:
+        conn.rollback()   # a double tap saved it already
+        saved = True
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.error(f"Saving job from {kind} list failed for {chat_id}: {e}")
+        try:
+            query.answer("❌ Error saving job")
+        except telegram.error.TelegramError:
+            pass
+        return
+    finally:
+        if conn:
+            db_pool.return_connection(conn)
+
+    try:
+        query.answer("✅ Job saved!" if saved else "🗑️ Removed from Saved Jobs")
+    except telegram.error.TelegramError:
+        pass
+    header = meta.get("header", "")
+    _, markup = job_list_page(chat_id, jobs, index // JOBS_PER_PAGE, kind, header)
+    try:
+        query.edit_message_reply_markup(reply_markup=markup)
+    except telegram.error.TelegramError:
+        pass
+
+
+def _alert_list_is_current(query, context):
+    """The alert list in user_data belongs to this message (a newer alert's
+    list replaces it)."""
+    meta = context.user_data.get("alert_meta") or {}
+    return bool(context.user_data.get("alert_jobs")) and \
+        meta.get("message_id") == query.message.message_id
+
+
+def alert_list_navigation(update: Update, context: CallbackContext):
+    """⬅️ / ➡️ on a new alert's list of current jobs. Outside the
+    conversation, so it works in any state."""
+    query = update.callback_query
+    user_id = update.effective_user.id
+    safe_answer_callback_query(query)
+    if not _alert_list_is_current(query, context):
+        try:
+            query.edit_message_text("This list has expired. New jobs still come as alerts.")
+        except telegram.error.TelegramError:
+            pass
+        return
+    page = int(query.data.split("_")[1])
+    jobs = context.user_data["alert_jobs"]
+    if search_pages.ready(user_id, jobs, (page + 1) * JOBS_PER_PAGE, kind="alert"):
+        _show_search_page_later(query, context, user_id, jobs, page, "alert")
+        return
+    try:
+        query.edit_message_text("🔎 Reading the next jobs' descriptions...")
+    except telegram.error.TelegramError:
+        pass
+    executor.submit(_show_search_page_later, query, context, user_id, jobs, page, "alert")
+
+
+def alert_list_close(update: Update, context: CallbackContext):
+    """❌ Close on a new alert's list: back to the main menu."""
+    query = update.callback_query
+    safe_answer_callback_query(query)
+    if _alert_list_is_current(query, context):
+        for key in ("alert_jobs", "alert_page", "alert_meta"):
+            context.user_data.pop(key, None)
+    text, keyboard = make_main_menu(context)
+    try:
+        query.edit_message_text(text, reply_markup=keyboard)
+    except telegram.error.TelegramError:
+        pass
 
 
 def cancel(update: Update, context: CallbackContext):
@@ -6599,46 +6771,13 @@ def alert_skip_filters(update: Update, context: CallbackContext):
     return MAIN_MENU
 
 
-# A new alert sends at most this many current jobs, best JobBERT match first.
-FIRST_SEND_MAX = 20
-
-
-def _send_first_jobs(bot, conn, cursor, alert, jobs):
-    """New alert: send the best of the jobs found right now, each checked like
-    any alert job (blocked companies, then Jev or Clef reads the full posting
-    against the keywords; the German and remote checks when they apply),
-    skipping jobs this chat already got from another alert. Returns how many
-    were sent; the caller records the rest as seen."""
-    check = send_filters.Check(alert["keywords"],
-                               no_german=alert_settings.skips_german_jobs(alert),
-                               workplaces=workplace.allowed_for(alert), max_fetches=40)
+def _current_alert_jobs(cursor, alert, jobs):
+    """New alert: the jobs found right now that its list may show. Drops
+    blocked companies and jobs this chat already got from another alert."""
     candidates, _ = companies.drop_blocked(jobs, companies.blocked_keys(cursor, alert["chat_id"]))
-    sent = 0
-    for job in candidates:
-        if sent >= FIRST_SEND_MAX or shutdown_requested.is_set():
-            break
-        meta = {
-            "_job_id": canonical_link(job["Link"]),
-            "_canonical_title": canonical_text(job["Title"]),
-            "_canonical_company": canonical_text(job["Company"]),
-            "_canonical_location": canonical_text(job.get("Location", "")),
-        }
-        if _already_sent(cursor, alert["chat_id"], meta["_job_id"], job["Link"],
-                         meta["_canonical_title"], meta["_canonical_company"]):
-            continue
-        verdict = check.job(cursor, job)
-        conn.commit()
-        if verdict != send_filters.SEND:
-            continue
-        try:
-            if _send_alert_job(bot, conn, cursor, alert, {**job, **meta}):
-                sent += 1
-                time.sleep(1.2)
-        except telegram.error.Unauthorized:
-            break
-    logger.info(f"New alert {alert['id']}: sent {sent} current job(s) at once "
-                f"({check.by_clef} judged by Clef)")
-    return sent
+    return [job for job in candidates
+            if not _already_sent(cursor, alert["chat_id"], canonical_link(job["Link"]), job["Link"],
+                                 canonical_text(job["Title"]), canonical_text(job["Company"]))]
 
 
 def setup_alert_threaded(query, context, keywords, location, prefs):
@@ -6687,20 +6826,27 @@ def setup_alert_threaded(query, context, keywords, location, prefs):
             progress_msg=None, user_id=user_id
         )
 
-        # Send the best of today's jobs now, checked like every alert job, so
-        # the user sees the alert work (Aravind, 2026-10-27: an alert that stays
-        # silent until a new posting appears looks broken).
+        # Show the jobs open right now as one paged list (like 🚀 Start
+        # Search), judged by Jev or Clef on the full posting a page at a time,
+        # so the user sees the alert work (Aravind, 2026-10-27: an alert that
+        # stays silent until a new posting appears looks broken).
         try:
             query.edit_message_text(
                 f"✅ Alert for '{keywords}' in '{location}' is set.\n\n"
-                "🔎 Reading the current jobs to send you the ones that match...")
+                "🔎 Reading the current jobs to find the ones that match...")
         except telegram.error.TelegramError:
             pass
         alert = {"id": alert_id, "chat_id": chat_id, "keywords": keywords, "location": location,
                  "filters": filters_json, "match_language": alert_settings.ANY}
-        first_sent = _send_first_jobs(context.bot, conn, cursor, alert, baseline_jobs)
+        current = _current_alert_jobs(cursor, alert, baseline_jobs)
+        conn.commit()
+        search_pages.start(user_id, current, keywords=keywords,
+                           workplaces=workplace.allowed_for(alert), kind="alert")
+        for job in current:
+            job.pop("Description", None)
+        _check_search_jobs(user_id, current, JOBS_PER_PAGE, "alert")
 
-        # Everything else counts as seen, so the alert only brings new postings from now on.
+        # All of them count as seen, so the alert only brings new postings from now on.
         for job in baseline_jobs:
             job_id = canonical_link(job["Link"])
             canonical_title = canonical_text(job["Title"])
@@ -6721,22 +6867,31 @@ def setup_alert_threaded(query, context, keywords, location, prefs):
 
         logger.info(
             f"Populated {len(baseline_jobs)} baseline jobs for new alert ID "
-            f"{alert_id}, sent {first_sent} of them"
+            f"{alert_id}; {len(current)} listed after the first page's check"
         )
 
         try:
-            sent_line = (f"I sent you {first_sent} matching job{'s' if first_sent != 1 else ''} "
-                         "that are open now." if first_sent else
-                         "No current job matches your keywords yet.")
-            message = (
-                f"✅ Alert for '{keywords}' in '{location}' is active.\n\n"
-                f"{sent_line} New jobs will come as they're posted."
-            )
-            query.edit_message_text(message)
-
-            time.sleep(3)
-            text, keyboard = make_main_menu(context)
-            query.edit_message_text(text, reply_markup=keyboard)
+            if current:
+                header = (f"✅ <b>Alert for '{html.escape(keywords)}' in "
+                          f"'{html.escape(location)}' is active.</b>\n"
+                          "These jobs are open now and match your keywords. "
+                          "New ones will come as they're posted.\n\n")
+                context.user_data["alert_jobs"] = current
+                context.user_data["alert_page"] = 0
+                context.user_data["alert_meta"] = {"keywords": keywords, "location": location,
+                                                   "header": header,
+                                                   "message_id": query.message.message_id}
+                text, markup = job_list_page(chat_id, current, 0, "alert", header)
+                query.edit_message_text(text, reply_markup=markup, parse_mode=ParseMode.HTML,
+                                        disable_web_page_preview=True)
+                _prefetch_search_page(user_id, current, 1, "alert")
+            else:
+                query.edit_message_text(
+                    f"✅ Alert for '{keywords}' in '{location}' is active.\n\n"
+                    "No job open now matches your keywords. New jobs will come as they're posted.")
+                time.sleep(3)
+                text, keyboard = make_main_menu(context)
+                query.edit_message_text(text, reply_markup=keyboard)
         except Exception as e:
             logger.error(f"Failed to update alert success message: {e}")
 
@@ -8984,6 +9139,12 @@ def main():
     # conversation state (e.g., after bot restart without persistence)
     dispatcher.add_handler(CallbackQueryHandler(save_job_callback, pattern="^save_job_"), group=1)
     dispatcher.add_handler(CallbackQueryHandler(unsave_from_alert_callback, pattern="^unsave_from_alert_"), group=1)
+    # 💾 n buttons on search results and new-alert lists, and the alert list's
+    # page buttons: stateless, so they work whatever state the conversation is in.
+    dispatcher.add_handler(CallbackQueryHandler(page_save_callback, pattern=r"^(ps|pa)_\d+_[0-9a-f]{8}$"), group=1)
+    dispatcher.add_handler(CallbackQueryHandler(alert_list_navigation, pattern=r"^apage_\d+$"), group=1)
+    dispatcher.add_handler(CallbackQueryHandler(alert_list_close, pattern="^aclose$"), group=1)
+    dispatcher.add_handler(CallbackQueryHandler(ignore_callback, pattern="^aignore$"), group=1)
 
     # Blocked companies, per-alert German setting, closed saved jobs
     # (features/handlers.py). Own group; their bc_/ams_/aml_/sj_ prefixes match nothing else.

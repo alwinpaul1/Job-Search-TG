@@ -18,6 +18,10 @@ Indeed descriptions can't be fetched again and are too big for user_data
 (PicklePersistence writes it to disk), so they are kept here, in memory, per
 user. After a restart a search has no session, and its remaining jobs are
 shown unjudged.
+
+A new alert's list of the jobs open right now is judged the same way. Each
+user has one session per kind ("search", "alert"), so neither list replaces
+the other.
 """
 import logging
 import threading
@@ -29,7 +33,7 @@ logger = logging.getLogger(__name__)
 # LinkedIn page fetches per check() call; the shared limiter in job_postings paces them.
 MAX_FETCHES = 40
 
-_sessions = {}   # user_id -> _Session, the latest search only
+_sessions = {}   # (user_id, kind) -> _Session, the latest list of that kind only
 _sessions_lock = threading.Lock()
 
 
@@ -43,26 +47,26 @@ class _Session:
         self.lock = threading.Lock()
 
 
-def start(user_id, jobs, *, keywords, workplaces=None):
-    """Register a new search. Call while the jobs still carry their descriptions."""
+def start(user_id, jobs, *, keywords, workplaces=None, kind="search"):
+    """Register a new list. Call while the jobs still carry their descriptions."""
     descriptions = {j["Link"]: j["Description"] for j in jobs
                     if j.get("Description") and not job_postings.linkedin_job_id(j["Link"])}
     with _sessions_lock:
-        _sessions[user_id] = _Session(keywords, workplaces, descriptions)
+        _sessions[(user_id, kind)] = _Session(keywords, workplaces, descriptions)
 
 
-def ready(user_id, jobs, count):
+def ready(user_id, jobs, count, kind="search"):
     """True when the first `count` jobs (or all of them) need no more checking."""
-    s = _sessions.get(user_id)
+    s = _sessions.get((user_id, kind))
     return s is None or s.checked >= min(count, len(jobs))
 
 
-def check(user_id, jobs, count, *, get_conn, return_conn):
+def check(user_id, jobs, count, *, get_conn, return_conn, kind="search"):
     """Judge jobs in order, deleting rejected ones from `jobs` in place, until
     the first `count` remaining have been checked or the list runs out.
     Deletions happen only past the checked part, so a page already shown never
-    changes under the user. Does nothing for a search without a session."""
-    s = _sessions.get(user_id)
+    changes under the user. Does nothing for a list without a session."""
+    s = _sessions.get((user_id, kind))
     if s is None:
         return
     with s.lock:
@@ -89,6 +93,6 @@ def check(user_id, jobs, count, *, get_conn, return_conn):
             raise
         finally:
             return_conn(conn)
-        logger.info(f"Live search {user_id} '{s.keywords}': {s.checked} jobs checked, "
+        logger.info(f"Job list ({kind}) {user_id} '{s.keywords}': {s.checked} jobs checked, "
                     f"{s.dropped} rejected so far, {unchecked} shown unjudged this time, "
                     f"{run.by_clef} by Clef")
