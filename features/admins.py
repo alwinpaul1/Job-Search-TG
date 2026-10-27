@@ -3,12 +3,14 @@
     /admins, or 👑 Admins in /admin    owner only: list admins, ➕ add one from
                                        the invited users, ✖️ remove one; each
                                        change has a confirm step
-    📨 Invites in /admin               owner only: recent invite links and their
-                                       status; ✖️ cancels an unused one, whoever made it
+    📨 Invites in /admin               the owner sees every recent invite link and
+                                       its status and can ✖️ cancel any unused one;
+                                       another admin sees 📨 My invites: only the links
+                                       they made, and cancels only those
 
 Callback data:
     own_admins / own_addlist / own_add_<id> / own_addok_<id> / own_rm_<id> / own_rmok_<id>
-    own_invites / own_ic_<code>
+    own_invites / own_ic_<code>                (any admin; scoped as above)
 
 Admins live in the `admins` table. bot.py's ADMIN_USER_IDS is the live set
 every `in ADMIN_USER_IDS` check reads; it is updated in place after each change
@@ -41,11 +43,14 @@ _owner = None
 
 def panel_rows(user_id):
     """Extra button rows for the /admin user list."""
-    rows = [[InlineKeyboardButton("🔗 Invite someone", callback_data="acc_invite")]]
+    invite = InlineKeyboardButton("🔗 Invite someone", callback_data="acc_invite")
     if user_id == _owner:
-        rows.append([InlineKeyboardButton("👑 Admins", callback_data="own_admins"),
-                     InlineKeyboardButton("📨 Invites", callback_data="own_invites")])
-    return rows
+        return [[invite],
+                [InlineKeyboardButton("👑 Admins", callback_data="own_admins"),
+                 InlineKeyboardButton("📨 Invites", callback_data="own_invites")]]
+    # Other admins see the links they made, and who joined with them
+    # (Aravind, 2026-10-27: his invite "doesn't show as mine").
+    return [[invite, InlineKeyboardButton("📨 My invites", callback_data="own_invites")]]
 
 
 def _apply(live, ids):
@@ -104,6 +109,9 @@ class _Owner:
         if update.callback_query:
             _answer(update.callback_query, "Only the master admin can do that.")
         return False
+
+    def _is_admin(self, update):
+        return update.effective_user.id in self.live
 
     def _show(self, update, text, rows):
         markup = InlineKeyboardMarkup(rows)
@@ -227,17 +235,21 @@ class _Owner:
     # --- invites --------------------------------------------------------------
 
     def invites_screen(self, update, context, answered=False):
-        if not self._is_owner(update):
+        """Every invite for the owner; an admin's own invites for other admins."""
+        if not self._is_admin(update):
             return
         if not answered:
             _answer(update.callback_query)
+        me = update.effective_user.id
+        everyone = me == self.owner_id
 
         def work(cur):
             cur.execute(
                 """SELECT code, created_by, used_by, created_at, used_at, cancelled_at,
                           expires_at, expires_at > NOW() AS live
-                   FROM invites ORDER BY created_at DESC LIMIT %s""",
-                (_INVITES_SHOWN,),
+                   FROM invites WHERE %s OR created_by = %s
+                   ORDER BY created_at DESC LIMIT %s""",
+                (everyone, me, _INVITES_SHOWN),
             )
             rows = cur.fetchall()
             ids = {r["created_by"] for r in rows} | {r["used_by"] for r in rows if r["used_by"]}
@@ -245,36 +257,44 @@ class _Owner:
         invites, names = self._db(work)
         lines, buttons = [], []
         for r in invites:
-            by = html.escape(names[r["created_by"]])
+            # "from X" only on the owner's list: on an admin's own list it's always them
+            by = f" · from {html.escape(names[r['created_by']])}" if everyone else ""
             made = r["created_at"].strftime("%d %b")
             if r["used_by"]:
-                lines.append(f"✅ used by {html.escape(names[r['used_by']])} · from {by} · {made}")
+                lines.append(f"✅ used by {html.escape(names[r['used_by']])} on "
+                             f"{r['used_at']:%d %b %H:%M}{by} · {made}")
             elif r["cancelled_at"]:
-                lines.append(f"✖️ cancelled · from {by} · {made}")
+                lines.append(f"✖️ cancelled{by} · {made}")
             elif not r["live"]:
-                lines.append(f"⌛ expired · from {by} · {made}")
+                lines.append(f"⌛ expired{by} · {made}")
             else:
-                lines.append(f"🟢 open until {r['expires_at']:%d %b %H:%M} · from {by} · {made}")
+                lines.append(f"🟢 open until {r['expires_at']:%d %b %H:%M}{by} · {made}")
+                whose = f"{names[r['created_by']][:20]}'s " if everyone else ""
                 buttons.append([InlineKeyboardButton(
-                    f"✖️ Cancel {names[r['created_by']][:20]}'s {r['created_at']:%d %b %H:%M} link",
+                    f"✖️ Cancel {whose}{r['created_at']:%d %b %H:%M} link",
                     callback_data=f"own_ic_{r['code']}")])
-        text = (f"📨 <b>Invites</b> (latest {_INVITES_SHOWN})\n\n" + "\n".join(lines)
-                if lines else "📨 <b>Invites</b>\n\nNo invite links yet.")
+        title = "📨 <b>Invites</b>" if everyone else "📨 <b>My invites</b>"
+        text = (f"{title} (latest {_INVITES_SHOWN})\n\n" + "\n".join(lines)
+                if lines else f"{title}\n\nNo invite links yet.")
         buttons.append([InlineKeyboardButton("🔗 New invite", callback_data="acc_invite")])
-        buttons.append([InlineKeyboardButton("👑 Admins", callback_data="own_admins"),
-                        InlineKeyboardButton("🔙 Admin panel", callback_data="adm_users")])
+        back = InlineKeyboardButton("🔙 Admin panel", callback_data="adm_users")
+        buttons.append([InlineKeyboardButton("👑 Admins", callback_data="own_admins"), back]
+                       if everyone else [back])
         self._show(update, text, buttons)
 
     def cancel_invite(self, update, context):
-        if not self._is_owner(update):
+        """The owner cancels any unused link; another admin only their own."""
+        if not self._is_admin(update):
             return
         code = context.match.group(1)
+        me = update.effective_user.id
 
         def work(cur):
             cur.execute(
                 """UPDATE invites SET cancelled_at = NOW()
-                   WHERE code = %s AND used_by IS NULL AND cancelled_at IS NULL""",
-                (code,),
+                   WHERE code = %s AND used_by IS NULL AND cancelled_at IS NULL
+                     AND (%s OR created_by = %s)""",
+                (code, me == self.owner_id, me),
             )
             return cur.rowcount
         cancelled = self._db(work)

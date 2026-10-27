@@ -2474,6 +2474,36 @@ def _format_user_label(first_name, username, chat_id):
         return f"🆔 {chat_id}"
 
 
+def _admin_users_page(cursor, offset):
+    """(total, rows) for one page of the /admin user list: everyone with
+    access, not only people with alerts. Someone who just joined through an
+    invite has none yet and must still be findable (Aravind couldn't find
+    Sachin, 2026-10-27). Most alerts first, then the newest joiners."""
+    users_sql = "SELECT chat_id FROM alerts UNION SELECT chat_id FROM allowed_users"
+    cursor.execute(f"SELECT COUNT(*) FROM ({users_sql}) u")
+    total = cursor.fetchone()["count"]
+    cursor.execute(f"""
+        SELECT u.chat_id, COUNT(a.id) AS alert_count,
+               SUM(CASE WHEN a.is_active = 1 THEN 1 ELSE 0 END) AS active_count,
+               us.first_name, us.username
+        FROM ({users_sql}) u
+        LEFT JOIN alerts a ON a.chat_id = u.chat_id
+        LEFT JOIN user_settings us ON us.chat_id = u.chat_id
+        LEFT JOIN allowed_users au ON au.chat_id = u.chat_id
+        GROUP BY u.chat_id, us.first_name, us.username, au.added_at
+        ORDER BY alert_count DESC, au.added_at DESC NULLS LAST, u.chat_id
+        LIMIT %s OFFSET %s
+    """, (ADMIN_USERS_PER_PAGE, offset))
+    return total, cursor.fetchall()
+
+
+def _admin_user_button(u):
+    label = _format_user_label(u["first_name"], u["username"], u["chat_id"])
+    total, active = u["alert_count"], u["active_count"] or 0
+    text = f"{label} — {total} alerts ({active} active)" if total else f"{label} — no alerts yet"
+    return InlineKeyboardButton(text, callback_data=f"adm_user_{u['chat_id']}")
+
+
 def admin_command(update: Update, context: CallbackContext):
     """Entry point for /admin — show paginated user list."""
     if update.effective_user.id not in ADMIN_USER_IDS:
@@ -2484,35 +2514,15 @@ def admin_command(update: Update, context: CallbackContext):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(DISTINCT chat_id) FROM alerts")
-        total_users = cursor.fetchone()["count"]
-
-        cursor.execute("""
-            SELECT a.chat_id, COUNT(*) AS alert_count,
-                   SUM(CASE WHEN a.is_active = 1 THEN 1 ELSE 0 END) AS active_count,
-                   us.first_name, us.username
-            FROM alerts a
-            LEFT JOIN user_settings us ON a.chat_id = us.chat_id
-            GROUP BY a.chat_id, us.first_name, us.username
-            ORDER BY alert_count DESC
-            LIMIT %s OFFSET 0
-        """, (ADMIN_USERS_PER_PAGE,))
-        users = cursor.fetchall()
+        total_users, users = _admin_users_page(cursor, 0)
     finally:
         if conn:
             db_pool.return_connection(conn)
 
-    text = f"👑 *Admin Panel*\n\n👥 Users with alerts: {total_users}\n\nSelect a user:"
+    text = f"👑 *Admin Panel*\n\n👥 Users: {total_users}\n\nSelect a user:"
     keyboard = []
     for u in users:
-        cid = u["chat_id"]
-        total = u["alert_count"]
-        active = u["active_count"] or 0
-        label = _format_user_label(u["first_name"], u["username"], cid)
-        keyboard.append([InlineKeyboardButton(
-            f"{label} — {total} alerts ({active} active)",
-            callback_data=f"adm_user_{cid}"
-        )])
+        keyboard.append([_admin_user_button(u)])
 
     nav_row = []
     if total_users > ADMIN_USERS_PER_PAGE:
@@ -2545,38 +2555,18 @@ def admin_user_list(update: Update, context: CallbackContext):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(DISTINCT chat_id) FROM alerts")
-        total_users = cursor.fetchone()["count"]
-
-        cursor.execute("""
-            SELECT a.chat_id, COUNT(*) AS alert_count,
-                   SUM(CASE WHEN a.is_active = 1 THEN 1 ELSE 0 END) AS active_count,
-                   us.first_name, us.username
-            FROM alerts a
-            LEFT JOIN user_settings us ON a.chat_id = us.chat_id
-            GROUP BY a.chat_id, us.first_name, us.username
-            ORDER BY alert_count DESC
-            LIMIT %s OFFSET %s
-        """, (ADMIN_USERS_PER_PAGE, offset))
-        users = cursor.fetchall()
+        total_users, users = _admin_users_page(cursor, offset)
     finally:
         if conn:
             db_pool.return_connection(conn)
 
     page_num = offset // ADMIN_USERS_PER_PAGE + 1
     total_pages = (total_users + ADMIN_USERS_PER_PAGE - 1) // ADMIN_USERS_PER_PAGE
-    text = f"👑 *Admin Panel*\n\n👥 Users with alerts: {total_users} (page {page_num}/{total_pages})\n\nSelect a user:"
+    text = f"👑 *Admin Panel*\n\n👥 Users: {total_users} (page {page_num}/{total_pages})\n\nSelect a user:"
 
     keyboard = []
     for u in users:
-        cid = u["chat_id"]
-        total = u["alert_count"]
-        active = u["active_count"] or 0
-        label = _format_user_label(u["first_name"], u["username"], cid)
-        keyboard.append([InlineKeyboardButton(
-            f"{label} — {total} alerts ({active} active)",
-            callback_data=f"adm_user_{cid}"
-        )])
+        keyboard.append([_admin_user_button(u)])
 
     nav_row = []
     if offset > 0:
