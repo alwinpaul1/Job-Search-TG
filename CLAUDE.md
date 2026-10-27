@@ -106,7 +106,7 @@ The checker dedups per **chat** (not per alert) with four paths, in one SELECT (
 The 14-day window on paths 3–4 is the compromise between blocking cross-board duplicates and allowing legitimate reposts (a company closing and re-listing a role gets a fresh LinkedIn ID; after 14 days the fuzzy match no longer blocks it). A 48h recency buffer vs `last_checked` additionally filters old postings (intentionally wide — job dates are day-granular).
 
 `sent_jobs` PK is `(alert_id, job_link)`; all inserts use `ON CONFLICT DO NOTHING`. Three code paths insert into `sent_jobs` (all must stay in sync, identical column lists):
-- **Baseline population** (~line 6390): when a new alert is created
+- **Baseline population** (`setup_alert_threaded`): when a new alert is created. First `_send_first_jobs` sends up to `FIRST_SEND_MAX` (20) of the jobs found right now, best JobBERT match first, each checked like a round job (`send_filters.Check`: blocked companies, Jev/Clef on the full description, German and remote checks) and skipped if the chat already got it from another alert (Aravind, 2026-10-27: a new alert that stays silent until a new posting looks broken). The rest is then recorded as seen. Sends go through `_send_alert_job`, the same function the round uses; duplicate checks through `_already_sent`
 - **Alert-update** (~line 7290): when alert filters are edited (uses an in-memory `sent_job_ids` set, job_id-only membership; ON CONFLICT covers the rest)
 - **Main alert loop** (~line 7790): per-job insert+commit immediately after each successful Telegram send (at-least-once delivery — a crash between send and commit re-sends at most one job)
 

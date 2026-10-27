@@ -6599,6 +6599,48 @@ def alert_skip_filters(update: Update, context: CallbackContext):
     return MAIN_MENU
 
 
+# A new alert sends at most this many current jobs, best JobBERT match first.
+FIRST_SEND_MAX = 20
+
+
+def _send_first_jobs(bot, conn, cursor, alert, jobs):
+    """New alert: send the best of the jobs found right now, each checked like
+    any alert job (blocked companies, then Jev or Clef reads the full posting
+    against the keywords; the German and remote checks when they apply),
+    skipping jobs this chat already got from another alert. Returns how many
+    were sent; the caller records the rest as seen."""
+    check = send_filters.Check(alert["keywords"],
+                               no_german=alert_settings.skips_german_jobs(alert),
+                               workplaces=workplace.allowed_for(alert), max_fetches=40)
+    candidates, _ = companies.drop_blocked(jobs, companies.blocked_keys(cursor, alert["chat_id"]))
+    sent = 0
+    for job in candidates:
+        if sent >= FIRST_SEND_MAX or shutdown_requested.is_set():
+            break
+        meta = {
+            "_job_id": canonical_link(job["Link"]),
+            "_canonical_title": canonical_text(job["Title"]),
+            "_canonical_company": canonical_text(job["Company"]),
+            "_canonical_location": canonical_text(job.get("Location", "")),
+        }
+        if _already_sent(cursor, alert["chat_id"], meta["_job_id"], job["Link"],
+                         meta["_canonical_title"], meta["_canonical_company"]):
+            continue
+        verdict = check.job(cursor, job)
+        conn.commit()
+        if verdict != send_filters.SEND:
+            continue
+        try:
+            if _send_alert_job(bot, conn, cursor, alert, {**job, **meta}):
+                sent += 1
+                time.sleep(1.2)
+        except telegram.error.Unauthorized:
+            break
+    logger.info(f"New alert {alert['id']}: sent {sent} current job(s) at once "
+                f"({check.by_clef} judged by Clef)")
+    return sent
+
+
 def setup_alert_threaded(query, context, keywords, location, prefs):
     """Thread-safe alert setup that doesn't block other users."""
     user_id = query.from_user.id
@@ -6645,6 +6687,20 @@ def setup_alert_threaded(query, context, keywords, location, prefs):
             progress_msg=None, user_id=user_id
         )
 
+        # Send the best of today's jobs now, checked like every alert job, so
+        # the user sees the alert work (Aravind, 2026-10-27: an alert that stays
+        # silent until a new posting appears looks broken).
+        try:
+            query.edit_message_text(
+                f"✅ Alert for '{keywords}' in '{location}' is set.\n\n"
+                "🔎 Reading the current jobs to send you the ones that match...")
+        except telegram.error.TelegramError:
+            pass
+        alert = {"id": alert_id, "chat_id": chat_id, "keywords": keywords, "location": location,
+                 "filters": filters_json, "match_language": alert_settings.ANY}
+        first_sent = _send_first_jobs(context.bot, conn, cursor, alert, baseline_jobs)
+
+        # Everything else counts as seen, so the alert only brings new postings from now on.
         for job in baseline_jobs:
             job_id = canonical_link(job["Link"])
             canonical_title = canonical_text(job["Title"])
@@ -6665,15 +6721,16 @@ def setup_alert_threaded(query, context, keywords, location, prefs):
 
         logger.info(
             f"Populated {len(baseline_jobs)} baseline jobs for new alert ID "
-            f"{alert_id}"
+            f"{alert_id}, sent {first_sent} of them"
         )
 
         try:
+            sent_line = (f"I sent you {first_sent} matching job{'s' if first_sent != 1 else ''} "
+                         "that are open now." if first_sent else
+                         "No current job matches your keywords yet.")
             message = (
-                f"✅ Alert for '{keywords}' in '{location}' has been set and "
-                f"is now active. I've recorded {len(baseline_jobs)} existing "
-                "jobs so you'll only get notified about truly new "
-                "opportunities!"
+                f"✅ Alert for '{keywords}' in '{location}' is active.\n\n"
+                f"{sent_line} New jobs will come as they're posted."
             )
             query.edit_message_text(message)
 
@@ -7818,6 +7875,154 @@ def check_all_alerts(bot: Bot):
     logger.info("Scheduler finished checking alerts.")
 
 
+def _already_sent(cursor, chat_id, job_id, link, canonical_title, canonical_company):
+    """True if this chat already got the job. Dedup paths (title paths within 14 days):
+      1) same job_id (most precise)
+      2) same job_link (stable — catches re-sends when job_id changes,
+         e.g. after a canonical_link rule change; job_link is the sent_jobs PK)
+      3) same title + exact canonical_company (catches short names like
+         KLA, SAP, BMW, IBM that the first-word path filters out)
+      4) same title + first word of canonical_company (>= 4 chars) —
+         catches "Scalable Capital" / "Scalable GmbH" / "Scalable Press".
+    """
+    cursor.execute(
+        """SELECT 1 FROM sent_jobs WHERE
+           chat_id = %s AND (
+               job_id = %s OR
+               job_link = %s OR
+               (canonical_title = %s
+                AND canonical_title != ''
+                AND canonical_company != ''
+                AND sent_at > NOW() - INTERVAL '14 days'
+                AND (
+                    canonical_company = %s
+                    OR (length(split_part(canonical_company, ' ', 1)) >= 4
+                        AND split_part(canonical_company, ' ', 1) = split_part(%s, ' ', 1))
+                ))
+           )
+           LIMIT 1""",
+        (chat_id, job_id, link, canonical_title, canonical_company, canonical_company)
+    )
+    return cursor.fetchone() is not None
+
+
+def _send_alert_job(bot, conn, cursor, alert, job):
+    """Send one job to the alert's chat and record it. `job` carries the
+    _job_id / _canonical_* fields. Returns True if sent; raises
+    telegram.error.Unauthorized when the chat blocked the bot."""
+    # Cache job details BEFORE sending so the 💾 Save button works the
+    # moment the message lands (also computes the callback-safe job id).
+    job_id_for_callback = job["_job_id"]
+    if len(job_id_for_callback) > 40:  # Telegram 64-byte callback_data limit
+        job_id_for_callback = hashlib.md5(job_id_for_callback.encode()).hexdigest()[:16]
+    cursor.execute("""
+        INSERT INTO job_details_cache
+        (alert_id, job_id, job_link, job_title, company, location,
+         date_posted, cached_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+        ON CONFLICT (alert_id, job_id) DO UPDATE SET
+            job_link = EXCLUDED.job_link,
+            job_title = EXCLUDED.job_title,
+            company = EXCLUDED.company,
+            location = EXCLUDED.location,
+            date_posted = EXCLUDED.date_posted,
+            cached_at = NOW()
+    """, (
+        alert["id"], job_id_for_callback, job["Link"], job["Title"],
+        job["Company"], job["Location"], job["Date Posted"]
+    ))
+    conn.commit()
+
+    title = html.escape(job["Title"])
+    company = html.escape(job["Company"]) if job["Company"] else ""
+    location = html.escape(job["Location"]) if job["Location"] else ""
+    date_posted = html.escape(job["Date Posted"]) if job["Date Posted"] and job["Date Posted"] != "N/A" else ""
+    keywords = html.escape(alert["keywords"])
+    alert_location = html.escape(alert["location"])
+
+    if company and location:
+        company_line = f"<i>{company}</i> - {location}"
+    elif company:
+        company_line = f"<i>{company}</i>"
+    elif location:
+        company_line = location
+    else:
+        company_line = ""
+
+    date_line = f"Posted: {date_posted}\n\n" if date_posted else "\n"
+
+    message = (
+        "🔔 <b>New Job Alert!</b>\n\n"
+        f"<b>{title}</b>\n"
+        f"{company_line}\n"
+        f"{date_line}"
+        f"From your alert for: <b>{keywords}</b> in "
+        f"<b>{alert_location}</b>"
+    )
+    job_unique_id = f"{alert['id']}_{job_id_for_callback}"
+
+    cursor.execute(
+        "SELECT 1 FROM saved_jobs WHERE chat_id = %s AND job_link = %s",
+        (alert["chat_id"], job["Link"])
+    )
+    is_saved = cursor.fetchone() is not None
+
+    reply_markup = keyboards.alert_job_keyboard(
+        job["Link"], job_unique_id, saved=is_saved,
+        has_company=bool(job["Company"]),
+    )
+
+    try:
+        try:
+            bot.send_message(
+                chat_id=alert["chat_id"],
+                text=message,
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.HTML,
+            )
+        except telegram.error.RetryAfter as e:
+            # Telegram flood control: honor the wait once, then retry.
+            wait_s = float(getattr(e, "retry_after", 5)) + 1
+            logger.warning(
+                "Flood limit for chat %s — waiting %.0fs then retrying",
+                alert["chat_id"], wait_s
+            )
+            time.sleep(wait_s)
+            bot.send_message(
+                chat_id=alert["chat_id"],
+                text=message,
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.HTML,
+            )
+    except telegram.error.Unauthorized:
+        raise
+    except telegram.error.BadRequest:
+        logger.exception("Failed to send alert to %s", alert["chat_id"])
+        return False
+    except Exception:
+        logger.exception("An unexpected error occurred sending to %s", alert["chat_id"])
+        return False
+
+    # Record + commit IMMEDIATELY after each successful send: a
+    # crash/restart mid-burst must not re-send already-delivered
+    # jobs next cycle (the old batched insert lost all of them).
+    cursor.execute("""
+        INSERT INTO sent_jobs
+        (alert_id, chat_id, job_link, job_id, job_title,
+         company, canonical_title, canonical_company,
+         canonical_location, sent_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+        ON CONFLICT DO NOTHING
+    """, (
+        alert["id"], alert["chat_id"], job["Link"],
+        job["_job_id"], job["Title"], job["Company"],
+        job["_canonical_title"], job["_canonical_company"],
+        job["_canonical_location"]
+    ))
+    conn.commit()
+    return True
+
+
 def check_single_alert(alert, bot: Bot):
     """Check a single alert with enhanced error handling and memory management."""
     conn = None
@@ -7906,25 +8111,8 @@ def check_single_alert(alert, bot: Bot):
             #      KLA, SAP, BMW, IBM that the first-word path filters out)
             #   4) same title + first word of canonical_company (>= 4 chars) —
             #      catches "Scalable Capital" / "Scalable GmbH" / "Scalable Press"
-            cursor.execute(
-                """SELECT 1 FROM sent_jobs WHERE
-                   chat_id = %s AND (
-                       job_id = %s OR
-                       job_link = %s OR
-                       (canonical_title = %s
-                        AND canonical_title != ''
-                        AND canonical_company != ''
-                        AND sent_at > NOW() - INTERVAL '14 days'
-                        AND (
-                            canonical_company = %s
-                            OR (length(split_part(canonical_company, ' ', 1)) >= 4
-                                AND split_part(canonical_company, ' ', 1) = split_part(%s, ' ', 1))
-                        ))
-                   )
-                   LIMIT 1""",
-                (alert["chat_id"], job_id, job["Link"], canonical_title, canonical_company, canonical_company)
-            )
-            is_duplicate = cursor.fetchone() is not None
+            is_duplicate = _already_sent(cursor, alert["chat_id"], job_id, job["Link"],
+                                         canonical_title, canonical_company)
 
             if is_duplicate:
                 duped += 1
@@ -8011,116 +8199,12 @@ def check_single_alert(alert, bot: Bot):
                 conn.commit()
                 return
 
-        # Cache job details BEFORE sending so the 💾 Save button works the
-        # moment each message lands (also computes the callback-safe job id).
-        for job in jobs_to_send:
-            job_id_for_callback = job["_job_id"]
-            if len(job_id_for_callback) > 40:  # Telegram 64-byte callback_data limit
-                job_id_for_callback = hashlib.md5(job_id_for_callback.encode()).hexdigest()[:16]
-            job["_job_id_for_callback"] = job_id_for_callback
-            cursor.execute("""
-                INSERT INTO job_details_cache
-                (alert_id, job_id, job_link, job_title, company, location,
-                 date_posted, cached_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
-                ON CONFLICT (alert_id, job_id) DO UPDATE SET
-                    job_link = EXCLUDED.job_link,
-                    job_title = EXCLUDED.job_title,
-                    company = EXCLUDED.company,
-                    location = EXCLUDED.location,
-                    date_posted = EXCLUDED.date_posted,
-                    cached_at = NOW()
-            """, (
-                alert["id"], job_id_for_callback, job["Link"], job["Title"],
-                job["Company"], job["Location"], job["Date Posted"]
-            ))
-        conn.commit()
-
         sent_count = 0
         for job in jobs_to_send:
-            title = html.escape(job["Title"])
-            company = html.escape(job["Company"]) if job["Company"] else ""
-            location = html.escape(job["Location"]) if job["Location"] else ""
-            date_posted = html.escape(job["Date Posted"]) if job["Date Posted"] and job["Date Posted"] != "N/A" else ""
-            keywords = html.escape(alert["keywords"])
-            alert_location = html.escape(alert["location"])
-
-            if company and location:
-                company_line = f"<i>{company}</i> - {location}"
-            elif company:
-                company_line = f"<i>{company}</i>"
-            elif location:
-                company_line = location
-            else:
-                company_line = ""
-
-            date_line = f"Posted: {date_posted}\n\n" if date_posted else "\n"
-
-            message = (
-                "🔔 <b>New Job Alert!</b>\n\n"
-                f"<b>{title}</b>\n"
-                f"{company_line}\n"
-                f"{date_line}"
-                f"From your alert for: <b>{keywords}</b> in "
-                f"<b>{alert_location}</b>"
-            )
-            job_unique_id = f"{alert['id']}_{job['_job_id_for_callback']}"
-
-            # Check if job is already saved
-            cursor.execute(
-                "SELECT 1 FROM saved_jobs WHERE chat_id = %s AND job_link = %s",
-                (alert["chat_id"], job["Link"])
-            )
-            is_saved = cursor.fetchone() is not None
-
-            reply_markup = keyboards.alert_job_keyboard(
-                job["Link"], job_unique_id, saved=is_saved,
-                has_company=bool(job["Company"]),
-            )
-
             try:
-                try:
-                    bot.send_message(
-                        chat_id=alert["chat_id"],
-                        text=message,
-                        reply_markup=reply_markup,
-                        parse_mode=ParseMode.HTML,
-                    )
-                except telegram.error.RetryAfter as e:
-                    # Telegram flood control: honor the wait once, then retry.
-                    wait_s = float(getattr(e, "retry_after", 5)) + 1
-                    logger.warning(
-                        "Flood limit for chat %s — waiting %.0fs then retrying",
-                        alert["chat_id"], wait_s
-                    )
-                    time.sleep(wait_s)
-                    bot.send_message(
-                        chat_id=alert["chat_id"],
-                        text=message,
-                        reply_markup=reply_markup,
-                        parse_mode=ParseMode.HTML,
-                    )
-
-                # Record + commit IMMEDIATELY after each successful send: a
-                # crash/restart mid-burst must not re-send already-delivered
-                # jobs next cycle (the old batched insert lost all of them).
-                cursor.execute("""
-                    INSERT INTO sent_jobs
-                    (alert_id, chat_id, job_link, job_id, job_title,
-                     company, canonical_title, canonical_company,
-                     canonical_location, sent_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                    ON CONFLICT DO NOTHING
-                """, (
-                    alert["id"], alert["chat_id"], job["Link"],
-                    job["_job_id"], job["Title"], job["Company"],
-                    job["_canonical_title"], job["_canonical_company"],
-                    job["_canonical_location"]
-                ))
-                conn.commit()
-                sent_count += 1
-
-                time.sleep(1.2)
+                if _send_alert_job(bot, conn, cursor, alert, job):
+                    sent_count += 1
+                    time.sleep(1.2)
             except telegram.error.Unauthorized:
                 # User blocked the bot / chat is gone: deactivate their alerts
                 # instead of re-scraping and re-attempting every 30 minutes
@@ -8135,15 +8219,6 @@ def check_single_alert(alert, bot: Bot):
                 )
                 conn.commit()
                 return
-            except telegram.error.BadRequest:
-                logger.exception(
-                    "Failed to send alert to %s", alert["chat_id"]
-                )
-            except Exception:
-                logger.exception(
-                    "An unexpected error occurred sending to %s",
-                    alert["chat_id"]
-                )
 
         if sent_count:
             logger.info(
