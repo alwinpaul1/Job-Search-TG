@@ -169,7 +169,7 @@ diagnostic_file_handler.setFormatter(
 logger.addHandler(diagnostic_file_handler)
 
 # Feature modules (features/): blocklist, German-requirement check, saved-job status.
-from features import access, admins, alert_settings, companies, keyboards, ops_alerts, saved_status, send_filters, workplace
+from features import access, admins, alert_settings, companies, keyboards, ops_alerts, saved_status, search_pages, send_filters, workplace
 from features import handlers as feature_handlers
 from features import schema as feature_schema
 logging.getLogger("features").addHandler(diagnostic_file_handler)
@@ -6326,8 +6326,19 @@ def run_scrape_threaded(
                 finally:
                     if conn:
                         db_pool.return_connection(conn)
+                # Jev judges the results a page at a time on their full
+                # descriptions (features/search_pages.py); register the search
+                # while the Indeed descriptions are still on the jobs.
+                search_pages.start(
+                    user_id, sorted_jobs, keywords=search_keyword,
+                    workplaces=workplace.allowed_for(
+                        {"location": search_location, "filters": json.dumps(prefs)}),
+                )
                 for job in sorted_jobs:
                     job.pop("Description", None)
+                safe_progress_update(
+                    progress_msg, "🔎 **Reading the job descriptions...**", ParseMode.MARKDOWN)
+                _check_search_jobs(user_id, sorted_jobs, JOBS_PER_PAGE)
 
             if not sorted_jobs:
                 safe_progress_update(progress_msg, "Search complete. No jobs found with these criteria.")
@@ -6356,6 +6367,7 @@ def run_scrape_threaded(
                     parse_mode=ParseMode.HTML,
                     disable_web_page_preview=True,
                 )
+            _prefetch_search_page(user_id, sorted_jobs, 1)
 
         finally:
             # CRUCIAL: Release the lock so other processes can run.
@@ -6375,6 +6387,38 @@ def run_scrape(update: Update, context: CallbackContext, progress_msg):
 
 
 # --- Browse and End Handlers ---
+def _check_search_jobs(user_id, jobs, count):
+    """Have Jev judge live-search jobs until the first `count` are checked
+    (features/search_pages.py). If that fails, the jobs are shown unjudged."""
+    try:
+        search_pages.check(user_id, jobs, count,
+                           get_conn=get_db_connection, return_conn=db_pool.return_connection)
+    except Exception as e:
+        logger.warning(f"Live search {user_id}: judging jobs failed, showing them unjudged: {e}")
+
+
+def _prefetch_search_page(user_id, jobs, page):
+    """Judge `page` in the background while the user reads the one before it."""
+    executor.submit(_check_search_jobs, user_id, jobs, (page + 1) * JOBS_PER_PAGE)
+
+
+def _show_search_page_later(query, context, user_id, jobs, page):
+    """Judge, then show, a live-search page the background check hadn't reached."""
+    _check_search_jobs(user_id, jobs, (page + 1) * JOBS_PER_PAGE)
+    if not jobs:
+        query.edit_message_text("No more jobs about your keywords in these results.")
+        return
+    page = min(page, (len(jobs) - 1) // JOBS_PER_PAGE)
+    context.user_data["page"] = page
+    message_text, reply_markup = create_paginated_job_message(jobs, page)
+    try:
+        query.edit_message_text(text=message_text, reply_markup=reply_markup,
+                                parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except telegram.error.TelegramError as e:
+        logger.warning(f"Live search {user_id}: could not show page {page + 1}: {e}")
+    _prefetch_search_page(user_id, jobs, page + 1)
+
+
 def page_navigation(update: Update, context: CallbackContext):
     query = update.callback_query
     user_id = update.effective_user.id
@@ -6395,13 +6439,25 @@ def page_navigation(update: Update, context: CallbackContext):
             query.edit_message_text("❌ Search results expired. Please start a new search.")
             return MAIN_MENU
         
+        if not search_pages.ready(user_id, jobs, (page + 1) * JOBS_PER_PAGE):
+            # Not judged yet (Next pressed before the background check got
+            # there): judge off the dispatcher thread, then show the page.
+            try:
+                query.edit_message_text("🔎 Reading the next jobs' descriptions...")
+            except telegram.error.TelegramError:
+                pass
+            executor.submit(_show_search_page_later, query, context, user_id, jobs, page)
+            return Browse
+
+        page = min(page, max(0, (len(jobs) - 1) // JOBS_PER_PAGE))
         context.user_data["page"] = page
         message_text, reply_markup = create_paginated_job_message(jobs, page)
         
         if not message_text or not reply_markup:
             logger.warning(f"⚠️ Page navigation: Empty message for page {page}, user {user_id}")
             return Browse
-        
+        _prefetch_search_page(user_id, jobs, page + 1)
+
         # Edit message with new page
         try:
             query.edit_message_text(

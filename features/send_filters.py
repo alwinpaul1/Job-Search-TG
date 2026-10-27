@@ -144,6 +144,79 @@ def _judge(state, missing):
     return None, None
 
 
+# Verdicts of Check.job(). Every one except SEND is also a key in apply()'s stats.
+SEND = "send"
+UNCHECKED = ("no_description", "models_down")   # couldn't be judged right now
+
+
+class Check:
+    """Judges jobs one at a time against one set of questions. Alert checks
+    (apply) and live searches (features/search_pages.py) share it, so both
+    read the full description, ask the same questions and reuse the same
+    stored answers."""
+
+    def __init__(self, keywords, *, no_german=False, workplaces=None, max_fetches=MAX_FETCHES):
+        self.keywords = keywords
+        self.fit_key = job_fit.check_key(keywords)
+        self.questions = {self.fit_key: job_fit.QUESTION}
+        if no_german:
+            self.questions[german_requirement.CHECK_KEY] = german_requirement.QUESTION
+        if workplaces is not None:
+            self.questions[workplace.CHECK_KEY] = workplace.QUESTION
+        self.no_german = no_german
+        self.workplaces = workplaces
+        self.budget = [max_fetches]
+        self.models_down = False   # once Jev and Clef both failed, the rest of this run waits too
+        self.unreadable = 0
+        self.by_clef = 0
+
+    def job(self, cursor, job):
+        """SEND, or why not: off_topic, needs_german, wrong_place, closed,
+        no_description or models_down (the last two: not judged yet)."""
+        link = job["Link"]
+        answers = _stored(cursor, link, [*self.questions, _CLOSED_KEY])
+        if _CLOSED_KEY in answers:
+            return "closed"
+        missing = {k: q for k, q in self.questions.items() if k not in answers}
+
+        if missing and self.models_down:
+            return "models_down"
+        if missing:
+            description, closed, unreadable = _description(job, self.budget)
+            if closed:
+                _store(cursor, link, {_CLOSED_KEY: "1"})
+                return "closed"
+            if description is None:
+                self.unreadable += unreadable
+                return "no_description"
+            state = {"search_keywords": self.keywords, "job_title": job.get("Title", ""),
+                     "job_description": description}
+            fresh, model = _judge(state, missing)
+            if fresh is None:
+                self.models_down = True
+                ops_alerts.problem(("models", f"Jev and Clef are both down (Jev: {jev.last_error}, "
+                                              f"Clef: {clef.last_error}): new jobs are on hold"))
+                return "models_down"
+            if model == "clef":
+                self.by_clef += 1
+                ops_alerts.problem(("jev", f"Jev is down ({jev.last_error}): Clef is judging jobs instead"))
+                ops_alerts.resolved(_MODELS_BACK)
+            else:
+                ops_alerts.resolved(("jev", "Jev works again"), _MODELS_BACK)
+            _store(cursor, link, fresh)
+            answers.update(fresh)
+
+        if job_fit.off_topic(answers[self.fit_key]):
+            logger.info(f"Off-topic for '{self.keywords}' (P={answers[self.fit_key]}): {job.get('Title', '')[:80]}")
+            return "off_topic"
+        if self.no_german and german_requirement.needs_german(answers[german_requirement.CHECK_KEY]):
+            return "needs_german"
+        if self.workplaces is not None and workplace.wrong_place(answers[workplace.CHECK_KEY], self.workplaces):
+            logger.info(f"Not remote for '{self.keywords}' ({answers[workplace.CHECK_KEY]}): {job.get('Title', '')[:80]}")
+            return "wrong_place"
+        return SEND
+
+
 def apply(jobs, *, cursor, keywords, blocked, no_german, workplaces=None):
     """Return (to_send, stats). `blocked` is a set of company keys; `workplaces`
     the allowed workplaces for a remote alert (workplace.allowed_for), else None."""
@@ -152,66 +225,14 @@ def apply(jobs, *, cursor, keywords, blocked, no_german, workplaces=None):
     kept, stats["blocked"] = companies.drop_blocked(jobs, blocked)
     _prune(cursor)
 
-    fit_key = job_fit.check_key(keywords)
-    unreadable_count = 0
-    models_down = False   # once Jev and Clef both failed, the rest of this alert waits too
+    check = Check(keywords, no_german=no_german, workplaces=workplaces)
     to_send = []
-    budget = [MAX_FETCHES]
     for job in kept:
-        link = job["Link"]
-        questions = {fit_key: job_fit.QUESTION}
-        if no_german:
-            questions[german_requirement.CHECK_KEY] = german_requirement.QUESTION
-        if workplaces is not None:
-            questions[workplace.CHECK_KEY] = workplace.QUESTION
-        answers = _stored(cursor, link, [*questions, _CLOSED_KEY])
-        if _CLOSED_KEY in answers:
-            stats["closed"] += 1
-            continue
-        missing = {k: q for k, q in questions.items() if k not in answers}
-
-        if missing and models_down:
-            stats["models_down"] += 1
-            continue
-        if missing:
-            description, closed, unreadable = _description(job, budget)
-            if closed:
-                _store(cursor, link, {_CLOSED_KEY: "1"})
-                stats["closed"] += 1
-                continue
-            if description is None:
-                stats["no_description"] += 1
-                unreadable_count += unreadable
-                continue
-            state = {"search_keywords": keywords, "job_title": job.get("Title", ""),
-                     "job_description": description}
-            fresh, model = _judge(state, missing)
-            if fresh is None:
-                stats["models_down"] += 1
-                models_down = True
-                ops_alerts.problem(("models", f"Jev and Clef are both down (Jev: {jev.last_error}, "
-                                              f"Clef: {clef.last_error}): new jobs are on hold"))
-                continue
-            if model == "clef":
-                stats["by_clef"] += 1
-                ops_alerts.problem(("jev", f"Jev is down ({jev.last_error}): Clef is judging jobs instead"))
-                ops_alerts.resolved(_MODELS_BACK)
-            else:
-                ops_alerts.resolved(("jev", "Jev works again"), _MODELS_BACK)
-            _store(cursor, link, fresh)
-            answers.update(fresh)
-
-        if job_fit.off_topic(answers[fit_key]):
-            stats["off_topic"] += 1
-            logger.info(f"Off-topic for '{keywords}' (P={answers[fit_key]}): {job.get('Title', '')[:80]}")
-            continue
-        if no_german and german_requirement.needs_german(answers[german_requirement.CHECK_KEY]):
-            stats["needs_german"] += 1
-            continue
-        if workplaces is not None and workplace.wrong_place(answers[workplace.CHECK_KEY], workplaces):
-            stats["wrong_place"] += 1
-            logger.info(f"Not remote for '{keywords}' ({answers[workplace.CHECK_KEY]}): {job.get('Title', '')[:80]}")
-            continue
-        to_send.append(job)
-    ops_alerts.note_unreadable(unreadable_count)
+        verdict = check.job(cursor, job)
+        if verdict == SEND:
+            to_send.append(job)
+        else:
+            stats[verdict] += 1
+    stats["by_clef"] = check.by_clef
+    ops_alerts.note_unreadable(check.unreadable)
     return to_send, stats
