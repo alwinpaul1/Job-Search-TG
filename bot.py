@@ -169,7 +169,7 @@ diagnostic_file_handler.setFormatter(
 logger.addHandler(diagnostic_file_handler)
 
 # Feature modules (features/): blocklist, German-requirement check, saved-job status.
-from features import access, admins, alert_settings, companies, keyboards, ops_alerts, saved_status, search_pages, send_filters, workplace, workwise, personio, job_tasks
+from features import access, admins, alert_settings, companies, job_level, keyboards, ops_alerts, saved_status, search_pages, send_filters, workplace, workwise, personio, job_tasks
 from features import handlers as feature_handlers
 from features import schema as feature_schema
 logging.getLogger("features").addHandler(diagnostic_file_handler)
@@ -6112,10 +6112,6 @@ def _relevant_titles(keyword, titles):
 CAREER_SITE_BACKFILL = timedelta(days=14)
 
 
-def _is_career_site(link):
-    return "workwise.io/" in (link or "") or ".jobs.personio.de/" in (link or "")
-
-
 def _career_site_jobs(keyword, location, hours_old, job_types):
     personio.start(_known_companies)
     # Career-site jobs always reach back 14 days, whatever Date Posted says (Alwin 2026-11-02)
@@ -6900,8 +6896,8 @@ def setup_alert_threaded(query, context, keywords, location, prefs):
                  "filters": filters_json, "match_language": alert_settings.ANY}
         current = _current_alert_jobs(cursor, alert, baseline_jobs)
         conn.commit()
-        search_pages.start(user_id, current, keywords=keywords,
-                           workplaces=workplace.allowed_for(alert), kind="alert")
+        search_pages.start(user_id, current, keywords=keywords, workplaces=workplace.allowed_for(alert),
+                           levels=job_level.allowed_for(alert), kind="alert")
         for job in current:
             job.pop("Description", None)
         _check_search_jobs(user_id, current, JOBS_PER_PAGE, "alert")
@@ -8341,7 +8337,7 @@ def check_single_alert(alert, bot: Bot):
                     # 48h buffer: day-granularity dates from JobQuest need a wide
                     # window; the sent_jobs DB check above is the real dedup guard
                     cutoff = last_checked - timedelta(hours=48)
-                    if _is_career_site(job["Link"]):
+                    if job_level.is_career_site(job["Link"]):
                         cutoff = min(cutoff, datetime.now(pytz.utc) - CAREER_SITE_BACKFILL)
                     if job_posted_time < cutoff:
                         recency_skipped += 1
@@ -8383,6 +8379,7 @@ def check_single_alert(alert, bot: Bot):
             blocked=companies.blocked_keys(cursor, alert["chat_id"]),
             no_german=alert_settings.skips_german_jobs(alert),
             workplaces=workplace.allowed_for(alert),
+            levels=job_level.allowed_for(alert),
         )
 
         logger.info(
@@ -8390,6 +8387,7 @@ def check_single_alert(alert, bot: Bot):
             f"{duped} duped, {recency_skipped} old, "
             f"{fstats['blocked']} blocked co., {fstats['off_topic']} off-topic, "
             f"{fstats['needs_german']} need German, {fstats['wrong_place']} not remote, "
+            f"{fstats['wrong_level']} wrong level, "
             f"{fstats['closed']} closed, "
             f"deferred: {fstats['no_description']} no description, "
             f"{fstats['models_down']} Jev and Clef unavailable; "

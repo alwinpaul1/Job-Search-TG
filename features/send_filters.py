@@ -9,6 +9,10 @@ answers, in one request:
 For alerts whose location is "Remote", the same request also asks where the
 work is done (workplace): on-site jobs are dropped unless the alert allows them.
 
+Workwise and Personio jobs have no experience level, so for alerts with an
+experience filter the request also asks which level the posting is written
+for (job_level): jobs for a level the alert didn't select are dropped.
+
 A job is judged only on its full description and sent only after a model
 has judged it (owner's rule, 2026-10-23). Jev answers; when Jev can't be
 reached the identical request goes to Cloudflare's Clef (features/clef.py).
@@ -27,7 +31,7 @@ about once, across restarts too.
 import logging
 import time
 
-from features import clef, companies, german_requirement, jev, job_fit, job_postings, job_tasks, ops_alerts, workplace
+from features import clef, companies, german_requirement, jev, job_fit, job_level, job_postings, job_tasks, ops_alerts, workplace
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +123,8 @@ def _read(reply, missing, model):
                 fresh[key] = verdict
             elif key == workplace.CHECK_KEY:
                 fresh[key] = workplace.encode(answer)
+            elif key == job_level.CHECK_KEY:
+                fresh[key] = job_level.encode(answer)
             else:
                 p = job_fit.unrelated_probability(answer)
                 if not 0.0 <= p <= 1.0:
@@ -155,7 +161,7 @@ class Check:
     read the full description, ask the same questions and reuse the same
     stored answers."""
 
-    def __init__(self, keywords, *, no_german=False, workplaces=None, max_fetches=MAX_FETCHES):
+    def __init__(self, keywords, *, no_german=False, workplaces=None, levels=None, max_fetches=MAX_FETCHES):
         self.keywords = keywords
         self.fit_key = job_fit.check_key(keywords)
         self.questions = {self.fit_key: job_fit.QUESTION}
@@ -165,19 +171,24 @@ class Check:
             self.questions[workplace.CHECK_KEY] = workplace.QUESTION
         self.no_german = no_german
         self.workplaces = workplaces
+        self.levels = levels
         self.budget = [max_fetches]
         self.models_down = False   # once Jev and Clef both failed, the rest of this run waits too
         self.unreadable = 0
         self.by_clef = 0
 
     def job(self, cursor, job):
-        """SEND, or why not: off_topic, needs_german, wrong_place, closed,
+        """SEND, or why not: off_topic, needs_german, wrong_place, wrong_level, closed,
         no_description or models_down (the last two: not judged yet)."""
         link = job["Link"]
-        answers = _stored(cursor, link, [*self.questions, _CLOSED_KEY])
+        questions = self.questions
+        check_level = self.levels is not None and job_level.is_career_site(link)
+        if check_level:
+            questions = {**questions, job_level.CHECK_KEY: job_level.QUESTION}
+        answers = _stored(cursor, link, [*questions, _CLOSED_KEY])
         if _CLOSED_KEY in answers:
             return "closed"
-        missing = {k: q for k, q in self.questions.items() if k not in answers}
+        missing = {k: q for k, q in questions.items() if k not in answers}
 
         if missing and self.models_down:
             return "models_down"
@@ -209,6 +220,9 @@ class Check:
         if job_fit.off_topic(answers[self.fit_key]):
             logger.info(f"Off-topic for '{self.keywords}' (P={answers[self.fit_key]}): {job.get('Title', '')[:80]}")
             return "off_topic"
+        if check_level and job_level.wrong_level(answers[job_level.CHECK_KEY], self.levels):
+            logger.info(f"Wrong level for '{self.keywords}' ({answers[job_level.CHECK_KEY]}): {job.get('Title', '')[:80]}")
+            return "wrong_level"
         if answers[self.fit_key].split()[0] == "related":
             verdict = self._duties(cursor, job)
             if verdict is not None:
@@ -254,15 +268,16 @@ class Check:
         return None
 
 
-def apply(jobs, *, cursor, keywords, blocked, no_german, workplaces=None):
+def apply(jobs, *, cursor, keywords, blocked, no_german, workplaces=None, levels=None):
     """Return (to_send, stats). `blocked` is a set of company keys; `workplaces`
-    the allowed workplaces for a remote alert (workplace.allowed_for), else None."""
-    stats = {"blocked": 0, "off_topic": 0, "needs_german": 0, "wrong_place": 0, "closed": 0,
+    the allowed workplaces for a remote alert (workplace.allowed_for), else None;
+    `levels` the experience levels the alert selected (job_level.allowed_for), else None."""
+    stats = {"blocked": 0, "off_topic": 0, "needs_german": 0, "wrong_place": 0, "wrong_level": 0, "closed": 0,
              "no_description": 0, "models_down": 0, "by_clef": 0}
     kept, stats["blocked"] = companies.drop_blocked(jobs, blocked)
     _prune(cursor)
 
-    check = Check(keywords, no_german=no_german, workplaces=workplaces)
+    check = Check(keywords, no_german=no_german, workplaces=workplaces, levels=levels)
     to_send = []
     for job in kept:
         verdict = check.job(cursor, job)

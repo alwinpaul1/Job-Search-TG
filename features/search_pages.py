@@ -38,21 +38,22 @@ _sessions_lock = threading.Lock()
 
 
 class _Session:
-    def __init__(self, keywords, workplaces, descriptions):
+    def __init__(self, keywords, workplaces, levels, descriptions):
         self.keywords = keywords
         self.workplaces = workplaces
+        self.levels = levels
         self.descriptions = descriptions   # Indeed link -> full description
         self.checked = 0                   # jobs[:checked] passed (or couldn't be judged)
         self.dropped = 0
         self.lock = threading.Lock()
 
 
-def start(user_id, jobs, *, keywords, workplaces=None, kind="search"):
+def start(user_id, jobs, *, keywords, workplaces=None, levels=None, kind="search"):
     """Register a new list. Call while the jobs still carry their descriptions."""
     descriptions = {j["Link"]: j["Description"] for j in jobs
                     if j.get("Description") and not job_postings.linkedin_job_id(j["Link"])}
     with _sessions_lock:
-        _sessions[(user_id, kind)] = _Session(keywords, workplaces, descriptions)
+        _sessions[(user_id, kind)] = _Session(keywords, workplaces, levels, descriptions)
 
 
 def ready(user_id, jobs, count, kind="search"):
@@ -72,7 +73,7 @@ def check(user_id, jobs, count, *, get_conn, return_conn, kind="search"):
     with s.lock:
         if s.checked >= min(count, len(jobs)):
             return
-        run = send_filters.Check(s.keywords, workplaces=s.workplaces, max_fetches=MAX_FETCHES)
+        run = send_filters.Check(s.keywords, workplaces=s.workplaces, levels=s.levels, max_fetches=MAX_FETCHES)
         unchecked = 0
         conn = get_conn()
         try:
