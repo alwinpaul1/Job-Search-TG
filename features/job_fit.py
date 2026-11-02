@@ -5,41 +5,48 @@ Systems" got 404 jobs in a week (2026-10-23), most of them Werkstudent jobs in
 logistics, HR or auditing. Jev reads the keywords, the title and the full
 description and says whether the job's own work is in that field.
 
-The job is dropped when P(unrelated) >= DROP_AT. Tested on 339 real jobs from
-every active alert, hand-checked against title and description: 0.7 dropped
-40 of 75 off-topic jobs and 1 related one (a Siemens Energy gas-turbine job
-for a hydrogen alert). Alerts with precise keywords ("AI Engineer",
-"Marketing internship") lost nothing.
+The job is dropped when Jev's (or Clef's) most likely answer is "unrelated";
+"match" and "related" are sent (Alwin, 2026-11-01). The old rule, drop at
+P(unrelated) >= 0.7, sent jobs the model itself rated more unrelated than
+anything else (a Toyo Tires plant co-op for a hydrogen alert, 0.60).
+"related" excludes jobs that only share a broad field (IT, software, engineering,
+energy, marketing). On 100 real jobs this moved 13 from related to unrelated (an IT
+System Engineer and a C# developer for ML / data alerts among them) and no match
+to unrelated (2026-11-01).
 """
-
-DROP_AT = 0.7          # Jev (owner's choice, 2026-10-23)
-# Clef's scores sit lower for the same jobs. On the same 339 labelled jobs:
-# Clef >= 0.65 dropped 46 of 75 off-topic with 1 related job (Jev >= 0.7: 40
-# and 1); at 0.7 Clef dropped only 36. So Clef, the fallback, gets its own cut-off.
-DROP_AT_CLEF = 0.65
 
 # Stored answers are keyed by this plus the keywords; bump it when the
 # question's meaning changes so old answers are not reused.
-CHECK_PREFIX = "fit1:"
+CHECK_PREFIX = "fit3:"
 
-QUESTION = {
-    "type": "choice",
-    "instructions": (
-        "A job seeker set up a job alert with the search keywords in `search_keywords`. "
-        "Is this job posting about what those keywords ask for? Judge the subject or field "
-        "of the work the job does day to day, from `job_title` and `job_description`. "
-        "Words like working student, intern, Werkstudent, Praktikum, thesis, junior or "
-        "graduate only describe the type of position; matching only on those is not a fit. "
-        "The employer's industry alone does not make the job's own work fit."
-    ),
-    "criteria": {
-        "match": {"what": "The job's main work is in the field or subject the keywords name."},
-        "related": {"what": "The job is in the same broad area and touches the keywords' subject, "
-                            "but the subject is not its main focus."},
-        "unrelated": {"what": "The job's work is in a different field. It shares at most the "
-                              "position type (such as working student or intern) or the employer's industry."},
-    },
-}
+QUESTION = {'type': 'choice',
+ 'instructions': 'A job seeker set up a job alert with the search keywords in `search_keywords`. Decide how '
+                 'the work this job does day to day relates to the specific subject or role those keywords '
+                 'name, judged from `job_title` and `job_description`. Words like working student, intern, '
+                 'Werkstudent, Praktikum, thesis, junior, senior or graduate only describe the type of '
+                 'position; matching only on those is not a fit. Sharing only a broad field with the '
+                 'keywords, such as IT, software, engineering, energy, science, marketing or sales, is not a '
+                 "fit, and neither is the employer's industry alone.",
+ 'criteria': {'match': {'what': "The job's main day-to-day work is the specific subject or role the keywords "
+                                'name.',
+                        'examples': ["keywords 'Frontend Developer': the job builds web user interfaces",
+                                     "keywords 'Wind Energy Engineer': the job designs or commissions wind "
+                                     'turbines']},
+              'related': {'what': "The job's own daily work genuinely uses the keywords' specific subject as "
+                                  'a real, named part of the role, though it is not the main focus.',
+                          'examples': ["keywords 'Frontend Developer': a full-stack job where building the "
+                                       'web UI is one of its stated tasks',
+                                       "keywords 'Wind Energy Engineer': a grid-connection engineer whose "
+                                       'projects are wind farms'],
+                          'not_for': "Jobs in the same broad field that do not themselves do the keywords' "
+                                     'subject: those are unrelated.'},
+              'unrelated': {'what': "The job's own work does not involve the keywords' specific subject. It "
+                                    'may share a broad field, the position type, a buzzword in passing, or '
+                                    "the employer's industry.",
+                            'examples': ["keywords 'Frontend Developer': an IT support or network "
+                                         'administration job',
+                                         "keywords 'Wind Energy Engineer': an electrician wiring office "
+                                         'buildings at an energy company']}}}
 
 
 def check_key(keywords):
@@ -50,12 +57,15 @@ def unrelated_probability(answer):
     return float(answer["probabilities"]["unrelated"])
 
 
-def encode(p_unrelated, model):
-    """Stored form: '0.7100' for Jev (also what older rows hold), '0.6800 clef' for Clef."""
-    return f"{p_unrelated:.4f}" + (" clef" if model == "clef" else "")
+def top_answer(answer):
+    probabilities = {k: float(v) for k, v in answer["probabilities"].items()}
+    return max(probabilities, key=probabilities.get)
+
+
+def encode(answer, model):
+    """Stored form: 'related 0.4300' for Jev, 'unrelated 0.6100 clef' for Clef."""
+    return f"{top_answer(answer)} {unrelated_probability(answer):.4f}" + (" clef" if model == "clef" else "")
 
 
 def off_topic(stored):
-    """Apply the cut-off of the model that gave the stored answer."""
-    value, _, model = stored.partition(" ")
-    return float(value) >= (DROP_AT_CLEF if model == "clef" else DROP_AT)
+    return stored.split()[0] == "unrelated"

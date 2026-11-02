@@ -169,7 +169,7 @@ def parse(html_text):
         "no longer accepting applications" in html_text.lower()
     )
     desc_el = soup.select_one(".show-more-less-html__markup")
-    description = desc_el.get_text(" ", strip=True) if desc_el else ""
+    description = desc_el.get_text("\n", strip=True) if desc_el else ""
     # A page with neither marker nor title is a block or error page, not a job.
     if not closed and not soup.select_one(".top-card-layout__title"):
         return Posting(UNKNOWN)

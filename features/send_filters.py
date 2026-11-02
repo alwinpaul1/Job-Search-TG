@@ -27,7 +27,7 @@ about once, across restarts too.
 import logging
 import time
 
-from features import clef, companies, german_requirement, jev, job_fit, job_postings, ops_alerts, workplace
+from features import clef, companies, german_requirement, jev, job_fit, job_postings, job_tasks, ops_alerts, workplace
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +123,7 @@ def _read(reply, missing, model):
                 p = job_fit.unrelated_probability(answer)
                 if not 0.0 <= p <= 1.0:
                     raise ValueError(f"probability {p}")
-                fresh[key] = job_fit.encode(p, model)
+                fresh[key] = job_fit.encode(answer, model)
         return fresh
     except (KeyError, TypeError, ValueError) as e:
         logger.warning(f"Unusable model answer: {e}")
@@ -209,12 +209,49 @@ class Check:
         if job_fit.off_topic(answers[self.fit_key]):
             logger.info(f"Off-topic for '{self.keywords}' (P={answers[self.fit_key]}): {job.get('Title', '')[:80]}")
             return "off_topic"
+        if answers[self.fit_key].split()[0] == "related":
+            verdict = self._duties(cursor, job)
+            if verdict is not None:
+                return verdict
         if self.no_german and german_requirement.needs_german(answers[german_requirement.CHECK_KEY]):
             return "needs_german"
         if self.workplaces is not None and workplace.wrong_place(answers[workplace.CHECK_KEY], self.workplaces):
             logger.info(f"Not remote for '{self.keywords}' ({answers[workplace.CHECK_KEY]}): {job.get('Title', '')[:80]}")
             return "wrong_place"
         return SEND
+
+
+    def _duties(self, cursor, job):
+        link = job["Link"]
+        key = job_tasks.check_key(self.keywords)
+        stored = _stored(cursor, link, [key]).get(key)
+        if stored is None:
+            if self.models_down:
+                return "models_down"
+            description, closed, unreadable = _description(job, self.budget)
+            if closed:
+                _store(cursor, link, {_CLOSED_KEY: "1"})
+                return "closed"
+            if description is None:
+                self.unreadable += unreadable
+                return "no_description"
+            if not job_tasks.lines_of(description):
+                stored = job_tasks.NONE
+            else:
+                try:
+                    found = job_tasks.judge(jev.ask, self.keywords, job.get("Title", ""), job.get("Company", ""),
+                                            description)
+                except (KeyError, TypeError, ValueError) as e:
+                    logger.warning(f"Unusable duty answer: {e}")
+                    found = None
+                if found is None:
+                    return "models_down"
+                stored = job_tasks.encode(found[1], found[2], "jev")
+            _store(cursor, link, {key: stored})
+        if job_tasks.mention_only(stored):
+            logger.info(f"Mention-only for '{self.keywords}' ({stored}): {job.get('Title', '')[:80]}")
+            return "off_topic"
+        return None
 
 
 def apply(jobs, *, cursor, keywords, blocked, no_german, workplaces=None):

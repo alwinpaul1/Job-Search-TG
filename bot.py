@@ -169,7 +169,7 @@ diagnostic_file_handler.setFormatter(
 logger.addHandler(diagnostic_file_handler)
 
 # Feature modules (features/): blocklist, German-requirement check, saved-job status.
-from features import access, admins, alert_settings, companies, keyboards, ops_alerts, saved_status, search_pages, send_filters, workplace
+from features import access, admins, alert_settings, companies, keyboards, ops_alerts, saved_status, search_pages, send_filters, workplace, workwise, personio, job_tasks
 from features import handlers as feature_handlers
 from features import schema as feature_schema
 logging.getLogger("features").addHandler(diagnostic_file_handler)
@@ -6068,7 +6068,57 @@ def _jobquest_scrape_multi_board(keyword, location, filters_dict, results_wanted
         )
 
     _record_scrape_duration(keyword, location, _time.time() - _scrape_t0, per_site)
-    return (li_jobs or []) + _jobquest_df_to_bot_jobs(ig_df)
+    return (li_jobs or []) + _jobquest_df_to_bot_jobs(ig_df) + _career_site_jobs(keyword, location, base_kw.get("hours_old"), job_types)
+
+
+def _known_companies():
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT company FROM sent_jobs WHERE company <> ''")
+        return [row["company"] for row in cur.fetchall()]
+    finally:
+        db_pool.return_connection(conn)
+
+
+TITLE_MATCH_AT = 0.55
+TITLE_FLOOR = 0.45
+TITLE_TOP = 10
+_title_vectors = {}
+
+
+def _title_subject(text):
+    return job_tasks.subject_of(text)
+
+
+def _relevant_titles(keyword, titles):
+    model = get_jobbert_model()
+    if model is None:
+        return workwise.literal_titles(keyword, titles)
+    unique = list(dict.fromkeys(titles))
+    subjects = {t: _title_subject(t) for t in unique}
+    if len(_title_vectors) > 100_000:
+        _title_vectors.clear()
+    new = list({s for s in subjects.values() if s not in _title_vectors})
+    if new:
+        _title_vectors.update(zip(new, model.encode(new, normalize_embeddings=True, batch_size=64)))
+    phrases = [_title_subject(p) for p in (keyword or "").split(",") if p.strip()] or [keyword or ""]
+    wanted = model.encode(phrases, normalize_embeddings=True)
+    scored = sorted(((float((wanted @ _title_vectors[subjects[t]]).max()), t) for t in unique), reverse=True)
+    return {t for rank, (score, t) in enumerate(scored)
+            if score >= TITLE_MATCH_AT or (rank < TITLE_TOP and score >= TITLE_FLOOR)}
+
+
+def _career_site_jobs(keyword, location, hours_old, job_types):
+    personio.start(_known_companies)
+    found = []
+    for name, source in (("Workwise", workwise), ("Personio", personio)):
+        try:
+            found += [{**job, "Date Posted": _format_relative_posted(job["Date Posted"])}
+                      for job in source.jobs(keyword, location, hours_old, job_types, _relevant_titles)]
+        except Exception as e:
+            logger.warning(f"{name} jobs failed: {e}")
+    return found
 
 
 def scrape_linkedin_with_adaptive_jobbert(
