@@ -6109,6 +6109,13 @@ def _relevant_titles(keyword, titles):
             if score >= TITLE_MATCH_AT or (rank < TITLE_TOP and score >= TITLE_FLOOR)}
 
 
+CAREER_SITE_BACKFILL = timedelta(days=14)
+
+
+def _is_career_site(link):
+    return "workwise.io/" in (link or "") or ".jobs.personio.de/" in (link or "")
+
+
 def _career_site_jobs(keyword, location, hours_old, job_types):
     personio.start(_known_companies)
     found = []
@@ -8330,7 +8337,10 @@ def check_single_alert(alert, bot: Bot):
                     )
                     # 48h buffer: day-granularity dates from JobQuest need a wide
                     # window; the sent_jobs DB check above is the real dedup guard
-                    if job_posted_time < last_checked - timedelta(hours=48):
+                    cutoff = last_checked - timedelta(hours=48)
+                    if _is_career_site(job["Link"]):
+                        cutoff = min(cutoff, datetime.now(pytz.utc) - CAREER_SITE_BACKFILL)
+                    if job_posted_time < cutoff:
                         recency_skipped += 1
                         continue
                 except Exception as e:
