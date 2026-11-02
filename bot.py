@@ -6081,6 +6081,16 @@ def _known_companies():
         db_pool.return_connection(conn)
 
 
+def _alert_keywords():
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT keywords FROM alerts WHERE is_active = 1")
+        return [row["keywords"] for row in cur.fetchall()]
+    finally:
+        db_pool.return_connection(conn)
+
+
 TITLE_MATCH_AT = 0.55
 TITLE_FLOOR = 0.45
 TITLE_TOP = 10
@@ -6113,7 +6123,7 @@ CAREER_SITE_BACKFILL = timedelta(days=14)
 
 
 def _career_site_jobs(keyword, location, hours_old, job_types):
-    personio.start(_known_companies)
+    personio.start(_known_companies, _alert_keywords)
     # Career-site jobs always reach back 14 days, whatever Date Posted says (Alwin 2026-11-02)
     if hours_old:
         hours_old = max(hours_old, CAREER_SITE_BACKFILL.total_seconds() / 3600)
