@@ -6118,6 +6118,9 @@ def _is_career_site(link):
 
 def _career_site_jobs(keyword, location, hours_old, job_types):
     personio.start(_known_companies)
+    # Career-site jobs always reach back 14 days, whatever Date Posted says (Alwin 2026-11-02)
+    if hours_old:
+        hours_old = max(hours_old, CAREER_SITE_BACKFILL.total_seconds() / 3600)
     found = []
     for name, source in (("Workwise", workwise), ("Personio", personio)):
         try:
