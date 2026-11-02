@@ -47,13 +47,7 @@ def lines_of(description):
 
 
 def questions(n):
-    asked = {
-        "employer": {
-            "type": "noul",
-            "instructions": "Is the main business of `company` itself `subject` (it builds, makes or researches "
-                            "that subject), judging from `lines` and `job_title`?",
-        },
-    }
+    asked = {}
     for i in range(n):
         asked[f"d{i}"] = {
             "type": "noul",
@@ -84,22 +78,21 @@ def judge(ask, keywords, title, company, description):
     if not reply:
         return None
     pairs = [(float(reply[f"d{i}"]["noul"]), float(reply[f"s{i}"]["noul"])) for i in range(len(lines))]
-    return lines, pairs, float(reply["employer"]["noul"])
+    return lines, pairs
 
 
 def on_subject(pairs):
     return sum(1 for duty, on in pairs if duty >= DUTY_AT and on >= SUBJECT_AT)
 
 
-def encode(pairs, employer, model):
-    return f"{on_subject(pairs)}/{len(pairs)} e{employer:.2f}" + (" clef" if model == "clef" else "")
+def encode(pairs, model):
+    return f"{on_subject(pairs)}/{len(pairs)}" + (" clef" if model == "clef" else "")
 
 
 def mention_only(stored):
     if stored == NONE:
         return False
-    count, employer = stored.split()[:2]
-    return count.split("/")[0] == "0" and float(employer[1:]) < 0.5
+    return stored.split()[0].split("/")[0] == "0"
 
 
 if __name__ == "__main__":
@@ -109,10 +102,10 @@ if __name__ == "__main__":
                               "Abstimmung mit dem Produktteam", "Studium der Informatik"], lines_of(text)
     long_line = "A" * 20 + ". " + "B" * 400
     assert all(len(l) <= MAX_CHARS for l in lines_of(long_line))
-    assert encode([(0.9, 0.8), (0.9, 0.1), (0.2, 0.9)], 0.1, "jev") == "1/3 e0.10"
-    assert encode([(0.1, 0.1)], 0.7, "clef") == "0/1 e0.70 clef"
+    assert encode([(0.9, 0.8), (0.9, 0.1), (0.2, 0.9)], "jev") == "1/3"
+    assert encode([(0.1, 0.1)], "clef") == "0/1 clef"
     assert mention_only("0/7 e0.10") and mention_only("0/3 e0.20 clef") and not mention_only("1/9 e0.10")
-    assert not mention_only("0/9 e0.80") and not mention_only(NONE)
+    assert mention_only("0/9 e0.80") and not mention_only("2/9 e0.10") and not mention_only(NONE)
     assert subject_of("Werkstudent (m/w/d) KI-Engineering") == "KI-Engineering"
     assert keyword_subject("Working Student AI") == "AI" and keyword_subject("Marketing Internship") == "Marketing"
     assert keyword_subject("Marketing manager, Junior Campaign Manager") == "Marketing manager, Campaign Manager"

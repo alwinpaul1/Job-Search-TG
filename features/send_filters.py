@@ -246,7 +246,7 @@ class Check:
                     found = None
                 if found is None:
                     return "models_down"
-                stored = job_tasks.encode(found[1], found[2], "jev")
+                stored = job_tasks.encode(found[1], "jev")
             _store(cursor, link, {key: stored})
         if job_tasks.mention_only(stored):
             logger.info(f"Mention-only for '{self.keywords}' ({stored}): {job.get('Title', '')[:80]}")
